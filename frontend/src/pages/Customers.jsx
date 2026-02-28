@@ -1,0 +1,295 @@
+import { useState, useEffect } from 'react'
+import { Link } from 'react-router-dom'
+
+export default function Customers() {
+  const [customers, setCustomers] = useState([])
+  const [selected, setSelected] = useState(null)
+  const [detail, setDetail] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [search, setSearch] = useState('')
+  const [showForm, setShowForm] = useState(false)
+  const [form, setForm] = useState({ name: '', address: '', phone: '', email: '', notes: '' })
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    fetch('/api/customers')
+      .then(r => r.json())
+      .then(data => { setCustomers(data.customers || []); setLoading(false) })
+      .catch(() => setLoading(false))
+  }, [])
+
+  useEffect(() => {
+    if (!selected) return
+    setDetail(null)
+    fetch(`/api/customers/${selected.id}`)
+      .then(r => r.json())
+      .then(setDetail)
+      .catch(() => {})
+  }, [selected])
+
+  const filtered = customers.filter(c =>
+    !search || c.name.toLowerCase().includes(search.toLowerCase())
+  ).filter(c => !c.name.startsWith('_'))
+
+  const fmt = (n) => `$${(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}`
+
+  async function handleSave() {
+    if (!form.name.trim()) return
+    setSaving(true)
+    try {
+      const r = await fetch('/api/customers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form)
+      })
+      const newC = await r.json()
+      setCustomers(prev => [newC, ...prev])
+      setForm({ name: '', address: '', phone: '', email: '', notes: '' })
+      setShowForm(false)
+      setSelected(newC)
+    } catch (e) {
+      alert('Error saving customer')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (loading) return (
+    <div className="flex items-center justify-center h-64 text-gray-500">Loading customers...</div>
+  )
+
+  return (
+    <div className="flex h-full gap-0 -m-6">
+      {/* Left panel - customer list */}
+      <div className="w-72 bg-white border-r border-gray-200 flex flex-col flex-shrink-0">
+        <div className="p-4 border-b border-gray-100">
+          <div className="flex items-center justify-between mb-3">
+            <h1 className="text-lg font-bold text-gray-900">Customers</h1>
+            <button
+              onClick={() => setShowForm(true)}
+              className="text-xs bg-blue-600 text-white px-3 py-1.5 rounded-lg hover:bg-blue-700"
+            >
+              + New
+            </button>
+          </div>
+          <input
+            type="text"
+            placeholder="Search customers..."
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+        </div>
+        <div className="overflow-y-auto flex-1">
+          {filtered.map(c => (
+            <button
+              key={c.id}
+              onClick={() => setSelected(c)}
+              className={`w-full text-left px-4 py-3 border-b border-gray-50 hover:bg-gray-50 transition-colors ${selected?.id === c.id ? 'bg-blue-50 border-l-4 border-l-blue-500' : ''}`}
+            >
+              <div className="font-medium text-gray-900 text-sm">{c.name}</div>
+              <div className="text-xs text-gray-500 mt-0.5 flex gap-2">
+                <span>{c.job_count || 0} jobs</span>
+                {c.total_revenue > 0 && <span className="text-green-600">{fmt(c.total_revenue)}</span>}
+              </div>
+            </button>
+          ))}
+          {filtered.length === 0 && (
+            <div className="px-4 py-8 text-center text-gray-400 text-sm">No customers found</div>
+          )}
+        </div>
+        <div className="p-3 border-t border-gray-100 text-xs text-gray-400 text-center">
+          {filtered.length} customers
+        </div>
+      </div>
+
+      {/* Right panel - detail */}
+      <div className="flex-1 overflow-y-auto bg-gray-50 p-6">
+        {showForm && (
+          <div className="bg-white rounded-xl border border-gray-200 p-6 mb-6">
+            <h2 className="text-lg font-semibold text-gray-900 mb-4">New Customer</h2>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="col-span-2">
+                <label className="block text-xs font-medium text-gray-700 mb-1">Name *</label>
+                <input
+                  type="text"
+                  value={form.name}
+                  onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="Customer name"
+                />
+              </div>
+              <div className="col-span-2">
+                <label className="block text-xs font-medium text-gray-700 mb-1">Address</label>
+                <input
+                  type="text"
+                  value={form.address}
+                  onChange={e => setForm(f => ({ ...f, address: e.target.value }))}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="Street address"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Phone</label>
+                <input
+                  type="text"
+                  value={form.phone}
+                  onChange={e => setForm(f => ({ ...f, phone: e.target.value }))}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="(555) 555-5555"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-700 mb-1">Email</label>
+                <input
+                  type="email"
+                  value={form.email}
+                  onChange={e => setForm(f => ({ ...f, email: e.target.value }))}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="email@example.com"
+                />
+              </div>
+              <div className="col-span-2">
+                <label className="block text-xs font-medium text-gray-700 mb-1">Notes</label>
+                <textarea
+                  value={form.notes}
+                  onChange={e => setForm(f => ({ ...f, notes: e.target.value }))}
+                  rows={2}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  placeholder="Any notes..."
+                />
+              </div>
+            </div>
+            <div className="flex gap-3 mt-4">
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"
+              >
+                {saving ? 'Saving...' : 'Save Customer'}
+              </button>
+              <button
+                onClick={() => setShowForm(false)}
+                className="text-gray-600 px-4 py-2 rounded-lg text-sm hover:bg-gray-100"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {!selected && !showForm && (
+          <div className="flex flex-col items-center justify-center h-64 text-gray-400">
+            <div className="text-4xl mb-3">👤</div>
+            <div className="text-lg font-medium">Select a customer</div>
+            <div className="text-sm">or create a new one</div>
+          </div>
+        )}
+
+        {selected && (
+          <CustomerDetail customer={selected} detail={detail} fmt={fmt} />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function CustomerDetail({ customer, detail, fmt }) {
+  if (!detail) return (
+    <div className="flex items-center justify-center h-32 text-gray-400">Loading...</div>
+  )
+
+  const totalRevenue = detail.jobs?.reduce((s, j) => s + (j.total_amount || 0), 0) || 0
+  const totalHours = detail.time_entries?.reduce((s, t) => s + (t.hours || 0), 0) || 0
+  const avgRate = totalHours > 0 ? totalRevenue / totalHours : 0
+
+  return (
+    <div className="space-y-5">
+      {/* Header */}
+      <div className="bg-white rounded-xl border border-gray-200 p-6">
+        <div className="flex items-start justify-between">
+          <div>
+            <h2 className="text-xl font-bold text-gray-900">{customer.name}</h2>
+            {detail.address && <p className="text-gray-500 text-sm mt-1">{detail.address}</p>}
+            <div className="flex gap-4 mt-2">
+              {detail.phone && <a href={`tel:${detail.phone}`} className="text-sm text-blue-600">{detail.phone}</a>}
+              {detail.email && <a href={`mailto:${detail.email}`} className="text-sm text-blue-600">{detail.email}</a>}
+            </div>
+          </div>
+          <Link
+            to={`/estimate?customer=${customer.id}`}
+            className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700"
+          >
+            New Estimate
+          </Link>
+        </div>
+        {detail.notes && <p className="mt-3 text-sm text-gray-600 bg-gray-50 rounded-lg p-3">{detail.notes}</p>}
+      </div>
+
+      {/* Stats */}
+      <div className="grid grid-cols-3 gap-4">
+        <div className="bg-white rounded-xl border border-gray-200 p-4 text-center">
+          <div className="text-2xl font-bold text-gray-900">{fmt(totalRevenue)}</div>
+          <div className="text-xs text-gray-500 mt-1">Total Revenue</div>
+        </div>
+        <div className="bg-white rounded-xl border border-gray-200 p-4 text-center">
+          <div className="text-2xl font-bold text-gray-900">{totalHours.toFixed(1)}h</div>
+          <div className="text-xs text-gray-500 mt-1">Hours Worked</div>
+        </div>
+        <div className="bg-white rounded-xl border border-gray-200 p-4 text-center">
+          <div className="text-2xl font-bold text-gray-900">{avgRate > 0 ? fmt(avgRate) : '—'}</div>
+          <div className="text-xs text-gray-500 mt-1">Avg $/Hour</div>
+        </div>
+      </div>
+
+      {/* Jobs */}
+      <div className="bg-white rounded-xl border border-gray-200">
+        <div className="px-5 py-3 border-b border-gray-100 font-semibold text-gray-800 text-sm">
+          Jobs ({detail.jobs?.length || 0})
+        </div>
+        <div className="divide-y divide-gray-50">
+          {(detail.jobs || []).map(job => (
+            <div key={job.id} className="px-5 py-3 flex items-center justify-between hover:bg-gray-50">
+              <div>
+                <div className="text-sm font-medium text-gray-900">{job.invoice_id || `Job #${job.id}`}</div>
+                <div className="text-xs text-gray-500">{job.start_date}</div>
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="text-sm font-semibold">{fmt(job.total_amount)}</div>
+                <Link
+                  to={`/filing-cabinet?job=${job.id}`}
+                  className="text-xs text-blue-600 hover:text-blue-800"
+                >
+                  View →
+                </Link>
+              </div>
+            </div>
+          ))}
+          {(!detail.jobs || detail.jobs.length === 0) && (
+            <div className="px-5 py-6 text-center text-gray-400 text-sm">No jobs yet</div>
+          )}
+        </div>
+      </div>
+
+      {/* Recent Time Entries */}
+      {detail.time_entries?.length > 0 && (
+        <div className="bg-white rounded-xl border border-gray-200">
+          <div className="px-5 py-3 border-b border-gray-100 font-semibold text-gray-800 text-sm">
+            Recent Time Entries
+          </div>
+          <div className="divide-y divide-gray-50">
+            {detail.time_entries.slice(0, 10).map(t => (
+              <div key={t.id} className="px-5 py-3 flex items-center justify-between">
+                <div>
+                  <div className="text-sm text-gray-800">{t.description || 'No description'}</div>
+                  <div className="text-xs text-gray-500">{t.entry_date}</div>
+                </div>
+                <div className="text-sm font-medium text-gray-700">{(t.hours || 0).toFixed(1)}h</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}

@@ -1,0 +1,250 @@
+import { useState, useEffect } from 'react'
+
+export default function TimeEntry() {
+  const [entries, setEntries] = useState([])
+  const [customers, setCustomers] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [showForm, setShowForm] = useState(false)
+  const [filterCustomer, setFilterCustomer] = useState('')
+  const [form, setForm] = useState({
+    customer_id: '',
+    entry_date: new Date().toISOString().slice(0, 10),
+    hours: '',
+    description: '',
+    cost_code: '',
+  })
+
+  useEffect(() => {
+    Promise.all([
+      fetch('/api/time-entries').then(r => r.json()),
+      fetch('/api/customers').then(r => r.json()),
+    ]).then(([timeData, custData]) => {
+      setEntries(timeData.time_entries || [])
+      setCustomers((custData.customers || []).filter(c => !c.name.startsWith('_')))
+      setLoading(false)
+    }).catch(() => setLoading(false))
+  }, [])
+
+  async function handleSave() {
+    if (!form.customer_id || !form.hours || !form.entry_date) {
+      alert('Customer, date, and hours are required.')
+      return
+    }
+    setSaving(true)
+    try {
+      const r = await fetch('/api/time-entries', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...form,
+          hours: parseFloat(form.hours),
+          customer_id: parseInt(form.customer_id),
+        })
+      })
+      const newEntry = await r.json()
+      setEntries(prev => [newEntry, ...prev])
+      setForm(f => ({
+        ...f,
+        hours: '',
+        description: '',
+        cost_code: '',
+      }))
+      setShowForm(false)
+    } catch {
+      alert('Error saving time entry')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const filtered = entries.filter(e =>
+    !filterCustomer || String(e.customer_id) === filterCustomer
+  )
+
+  const totalHours = filtered.reduce((s, e) => s + (e.hours || 0), 0)
+
+  // Group by date
+  const byDate = filtered.reduce((acc, e) => {
+    const d = e.entry_date || 'Unknown'
+    if (!acc[d]) acc[d] = []
+    acc[d].push(e)
+    return acc
+  }, {})
+  const sortedDates = Object.keys(byDate).sort((a, b) => b.localeCompare(a))
+
+  if (loading) return (
+    <div className="flex items-center justify-center h-64 text-gray-500">Loading time entries...</div>
+  )
+
+  return (
+    <div className="space-y-5">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold text-gray-900">Time Tracking</h1>
+        <button
+          onClick={() => setShowForm(s => !s)}
+          className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700"
+        >
+          {showForm ? 'Cancel' : '+ Log Time'}
+        </button>
+      </div>
+
+      {/* Quick Entry Form */}
+      {showForm && (
+        <div className="bg-white rounded-xl border border-gray-200 p-5">
+          <h2 className="text-base font-semibold text-gray-900 mb-4">Log Time Entry</h2>
+          <div className="grid grid-cols-2 gap-4">
+            <div className="col-span-2 md:col-span-1">
+              <label className="block text-xs font-medium text-gray-700 mb-1">Customer *</label>
+              <select
+                value={form.customer_id}
+                onChange={e => setForm(f => ({ ...f, customer_id: e.target.value }))}
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">Select customer...</option>
+                {customers.map(c => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Date *</label>
+              <input
+                type="date"
+                value={form.entry_date}
+                onChange={e => setForm(f => ({ ...f, entry_date: e.target.value }))}
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Hours *</label>
+              <input
+                type="number"
+                step="0.25"
+                min="0.25"
+                max="24"
+                value={form.hours}
+                onChange={e => setForm(f => ({ ...f, hours: e.target.value }))}
+                placeholder="e.g. 3.5"
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Cost Code</label>
+              <input
+                type="text"
+                value={form.cost_code}
+                onChange={e => setForm(f => ({ ...f, cost_code: e.target.value }))}
+                placeholder="e.g. DECK, HVAC"
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            <div className="col-span-2">
+              <label className="block text-xs font-medium text-gray-700 mb-1">Description</label>
+              <textarea
+                rows={2}
+                value={form.description}
+                onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
+                placeholder="What work was done?"
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+          </div>
+          <div className="flex gap-3 mt-4">
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className="bg-blue-600 text-white px-5 py-2 rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50"
+            >
+              {saving ? 'Saving...' : 'Save Entry'}
+            </button>
+            <button
+              onClick={() => setShowForm(false)}
+              className="text-gray-600 px-4 py-2 rounded-lg text-sm hover:bg-gray-100"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Filter + Stats bar */}
+      <div className="flex items-center gap-4 bg-white rounded-xl border border-gray-200 px-5 py-3">
+        <div className="flex-1">
+          <select
+            value={filterCustomer}
+            onChange={e => setFilterCustomer(e.target.value)}
+            className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          >
+            <option value="">All customers</option>
+            {customers.map(c => (
+              <option key={c.id} value={c.id}>{c.name}</option>
+            ))}
+          </select>
+        </div>
+        <div className="text-sm text-gray-600">
+          <span className="font-semibold text-gray-900">{totalHours.toFixed(1)}h</span> total
+          {' · '}
+          <span className="font-semibold text-gray-900">{filtered.length}</span> entries
+        </div>
+      </div>
+
+      {/* Entries grouped by date */}
+      <div className="space-y-4">
+        {sortedDates.map(date => (
+          <div key={date} className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+            <div className="px-5 py-2.5 bg-gray-50 border-b border-gray-100 flex items-center justify-between">
+              <span className="text-sm font-semibold text-gray-700">{formatDate(date)}</span>
+              <span className="text-xs text-gray-500">
+                {byDate[date].reduce((s, e) => s + (e.hours || 0), 0).toFixed(1)}h
+              </span>
+            </div>
+            <div className="divide-y divide-gray-50">
+              {byDate[date].map(entry => (
+                <div key={entry.id} className="px-5 py-3 flex items-center justify-between">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-gray-900">{entry.customer_name || '—'}</div>
+                    {entry.description && (
+                      <div className="text-xs text-gray-500 mt-0.5 truncate">{entry.description}</div>
+                    )}
+                    {entry.cost_code && (
+                      <span className="inline-block mt-1 text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded">
+                        {entry.cost_code}
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-3 ml-4">
+                    <div className="text-sm font-semibold text-gray-900 tabular-nums">
+                      {(entry.hours || 0).toFixed(2)}h
+                    </div>
+                    {entry.source && entry.source !== 'manual' && (
+                      <span className="text-xs text-gray-400">{entry.source}</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+        {sortedDates.length === 0 && (
+          <div className="bg-white rounded-xl border border-gray-200 px-5 py-16 text-center text-gray-400">
+            <div className="text-3xl mb-3">⏱</div>
+            <div className="text-lg font-medium mb-1">No time entries yet</div>
+            <div className="text-sm">Click "Log Time" to add your first entry</div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function formatDate(dateStr) {
+  if (!dateStr || dateStr === 'Unknown') return 'Unknown Date'
+  try {
+    const d = new Date(dateStr + 'T00:00:00')
+    return d.toLocaleDateString('en-US', { weekday: 'short', month: 'long', day: 'numeric', year: 'numeric' })
+  } catch {
+    return dateStr
+  }
+}

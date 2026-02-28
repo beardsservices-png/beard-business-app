@@ -1,0 +1,19 @@
+Employee ID,First Name,Last Name,Time Off Date,Start,End,Break Total,Total,Customer,Type,Project #,Project,Subproject 1  #,Subproject 1,Subproject 2 #,Subproject 2,Subproject 3 #,Subproject 3,Subproject 4 #,Subproject 4,Subproject 5 #,Subproject 5,Subproject 6 #,Subproject 6,Cost Code,Cost Code Desc.,Equipment,Description
+118,Anthony,Beard,,2024-01-01T08:45:00.000-05:00,2024-01-01T10:45:00.000-05:00,00:00,02:00,Dale Kelly,Entry,,Dale Kelly: Deck,,,,,,,,,,,,,,,,
+118,Anthony,Beard,,2024-01-01T11:30:00.000-05:00,2024-01-01T13:30:00.000-05:00,00:00,02:00,Dale Kelly,Entry,,Dale Kelly: Deck,,,,,,,,,,,,,,,,
+118,Anthony,Beard,,2024-01-03T13:00:00.000-05:00,2024-01-03T15:30:00.000-05:00,00:00,02:30,Dale Kelly,Entry,,Dale Kelly: Deck,,,,,,,,,,,,,Billable,on site construction,,Deck
+118,Anthony,Beard,,2024-01-04T09:30:00.000-05:00,2024-01-04T12:45:00.000-05:00,00:00,03:15,Dale Kelly,Entry,,Dale Kelly: Deck,,,,,,,,,,,,,Billable,on site construction,,Deck
+118,Anthony,Beard,,2024-01-04T13:45:00.000-05:00,2024-01-04T19:30:00.000-05:00,00:00,05:45,Dale Kelly,Entry,,Dale Kelly: Deck,,,,,,,,,,,,,Billable,on site construction,,Deck
+118,Anthony,Beard,,2024-01-05T11:30:00.000-05:00,2024-01-05T15:15:00.000-05:00,00:00,03:45,Dale Kelly,Entry,,Dale Kelly: Deck,,,,,,,,,,,,,Billable,on site construction,,Deck
+118,Anthony,Beard,,2024-01-06T14:00:00.000-05:00,2024-01-06T15:15:00.000-05:00,00:00,01:15,Dale Kelly,Entry,,Dale Kelly: Deck,,,,,,,,,,,,,Billable,on site construction,,Deck
+118,Anthony,Beard,,2024-01-08T10:30:00.000-05:00,2024-01-08T11:00:00.000-05:00,00:00,00:30,Manar Jackson,Entry,20250707,Manar Jackson,,,,,,,,,,,,,Billable,on site construction,,Storage unit/flag
+118,Anthony,Beard,,2024-01-10T10:30:00.000-05:00,2024-01-10T13:00:00.000-05:00,00:00,02:30,Manar Jackson,Entry,20250707,Manar Jackson,,,,,,,,,,,,,Billable,on site construction,,Washed Truck
+118,Anthony,Beard,,2024-01-11T12:15:00.000-05:00,2024-01-11T15:15:00.000-05:00,00:00,03:00,Janice Butler Segress,Entry,,Segress,,,,,,,,,,,,,NonBillable,"off site job-specific actions such as, drawing plans, creating quotes, research, etc.)",,Materials from Home Depot
+118,Anthony,Beard,,2024-01-11T15:15:00.000-05:00,2024-01-11T16:00:00.000-05:00,00:00,00:45,Janice Butler Segress,Entry,,Segress,,,,,,,,,,,,,Billable,on site construction,,Dropped off materials
+118,Anthony,Beard,,2024-01-13T14:00:00.000-05:00,2024-01-13T16:00:00.000-05:00,00:00,02:00,Janice Butler Segress,Entry,,Segress,,,,,,,,,,,,,Billable,on site construction,,Deck Platform 12:54-2:52 on maps
+118,Anthony,Beard,,2024-01-14T08:45:00.000-05:00,2024-01-14T09:00:00.000-05:00,00:00,00:15,Janice Butler Segress,Entry,,Segress,,,,,,,,,,,,,Billable,on site construction,,Deck
+118,Anthony,Beard,,2024-01-16T13:45:00.000-05:00,2024-01-16T16:15:00.000-05:00,00:00,02:30,Janice Butler Segress,Entry,,Segress,,,,,,,,,,,,,Billable,on site construction,,Deck
+118,Anthony,Beard,,2024-01-17T11:30:00.000-05:00,2024-01-17T12:30:00.000-05:00,00:00,01:00,Janice Butler Segress,Entry,,Segress,,,,,,,,,,,,,Billable,on site construction,,Deck
+118,Anthony,Beard,,2024-01-17T13:00:00.000-05:00,2024-01-17T14:15:00.000-05:00,00:00,01:15,Janice Butler Segress,Entry,,Segress,,,,,,,,,,,,,Billable,on site construction,,Deck
+118,Anthony,Beard,,2024-01-31T10:00:00.000-05:00,2024-01-31T18:30:00.000-05:00,00:00,08:30,Tony Beard,Entry,,Dad's,,,,,,,,,,,,,Billable,on site construction,,
+118,Anthony,Beard,,2024-02-01T10:00:00.000-05:00,2024-02-01T15:15:00.000-05:00,00:00,05:15,Janice Butler Segress,Entry,,Segress,,,,,,,,,,,,,Billable,on site construction,,Gazebo
