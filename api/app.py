@@ -23,6 +23,45 @@ CORS(app)
 DB_PATH = os.path.join(os.path.dirname(__file__), '..', 'data', 'beard_business.db')
 
 
+def migrate_db():
+    """Run schema migrations at startup — safe to run multiple times."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    # trips table
+    cursor.execute('''CREATE TABLE IF NOT EXISTS trips (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trip_date TEXT NOT NULL,
+        trip_type TEXT NOT NULL,
+        destination TEXT,
+        customer_id INTEGER REFERENCES customers(id),
+        job_id INTEGER REFERENCES jobs(id),
+        miles REAL,
+        drive_time_minutes INTEGER,
+        notes TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+    )''')
+
+    # cya_notes on customers
+    try:
+        cursor.execute('ALTER TABLE customers ADD COLUMN cya_notes TEXT')
+    except Exception:
+        pass
+
+    # photos_album_url on jobs
+    try:
+        cursor.execute('ALTER TABLE jobs ADD COLUMN photos_album_url TEXT')
+    except Exception:
+        pass
+
+    conn.commit()
+    conn.close()
+
+
+migrate_db()
+
+
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -46,49 +85,133 @@ def dashboard():
     conn = get_db()
     cursor = conn.cursor()
 
-    cursor.execute('SELECT SUM(total_labor) as labor, SUM(total_materials) as materials FROM invoices')
+    # Optional date range filters
+    start = request.args.get('start')
+    end = request.args.get('end')
+    date_range = {'start': start, 'end': end}
+
+    # Build date-filter fragments
+    # For invoices: filter on invoice_date (with fallback to jobs.start_date via JOIN)
+    if start and end:
+        inv_date_filter = "AND COALESCE(i.invoice_date, j.start_date) BETWEEN ? AND ?"
+        inv_date_params = [start, end]
+        inv_simple_filter = "AND invoice_date BETWEEN ? AND ?"
+        inv_simple_params = [start, end]
+        te_date_filter = "AND date BETWEEN ? AND ?"
+        te_date_params = [start, end]
+        job_date_filter = "AND j.start_date BETWEEN ? AND ?"
+        job_date_params = [start, end]
+        sp_date_filter = "AND j.start_date BETWEEN ? AND ?"
+        sp_date_params = [start, end]
+    elif start:
+        inv_date_filter = "AND COALESCE(i.invoice_date, j.start_date) >= ?"
+        inv_date_params = [start]
+        inv_simple_filter = "AND invoice_date >= ?"
+        inv_simple_params = [start]
+        te_date_filter = "AND date >= ?"
+        te_date_params = [start]
+        job_date_filter = "AND j.start_date >= ?"
+        job_date_params = [start]
+        sp_date_filter = "AND j.start_date >= ?"
+        sp_date_params = [start]
+    elif end:
+        inv_date_filter = "AND COALESCE(i.invoice_date, j.start_date) <= ?"
+        inv_date_params = [end]
+        inv_simple_filter = "AND invoice_date <= ?"
+        inv_simple_params = [end]
+        te_date_filter = "AND date <= ?"
+        te_date_params = [end]
+        job_date_filter = "AND j.start_date <= ?"
+        job_date_params = [end]
+        sp_date_filter = "AND j.start_date <= ?"
+        sp_date_params = [end]
+    else:
+        inv_date_filter = ''
+        inv_date_params = []
+        inv_simple_filter = ''
+        inv_simple_params = []
+        te_date_filter = ''
+        te_date_params = []
+        job_date_filter = ''
+        job_date_params = []
+        sp_date_filter = ''
+        sp_date_params = []
+
+    # Total labor / materials from invoices
+    cursor.execute(f'''
+        SELECT SUM(i.total_labor) as labor, SUM(i.total_materials) as materials
+        FROM invoices i
+        LEFT JOIN jobs j ON i.job_id = j.id
+        WHERE 1=1 {inv_date_filter}
+    ''', inv_date_params)
     revenue = cursor.fetchone()
 
-    cursor.execute('SELECT SUM(hours) as total FROM time_entries')
+    # Total hours from time_entries
+    cursor.execute(f'''
+        SELECT SUM(hours) as total FROM time_entries
+        WHERE 1=1 {te_date_filter}
+    ''', te_date_params)
     hours = cursor.fetchone()
 
     cursor.execute("SELECT COUNT(*) as count FROM customers WHERE name != '_UNASSIGNED'")
     customers = cursor.fetchone()
 
-    cursor.execute('SELECT COUNT(*) as count FROM jobs')
+    cursor.execute(f'''
+        SELECT COUNT(*) as count FROM jobs j WHERE 1=1 {job_date_filter}
+    ''', job_date_params)
     jobs_count = cursor.fetchone()
 
-    cursor.execute('SELECT COUNT(*) as count FROM invoices')
+    cursor.execute(f'''
+        SELECT COUNT(*) as count FROM invoices i
+        LEFT JOIN jobs j ON i.job_id = j.id
+        WHERE 1=1 {inv_date_filter}
+    ''', inv_date_params)
     invoice_count = cursor.fetchone()
 
     # Average days on site per job (distinct calendar days with time entries)
-    cursor.execute('''
+    cursor.execute(f'''
         SELECT AVG(day_count) as avg_days
         FROM (
-            SELECT job_id, COUNT(DISTINCT entry_date) as day_count
-            FROM time_entries
-            WHERE job_id IS NOT NULL
-            GROUP BY job_id
+            SELECT te.job_id, COUNT(DISTINCT te.entry_date) as day_count
+            FROM time_entries te
+            WHERE te.job_id IS NOT NULL {te_date_filter}
+            GROUP BY te.job_id
             HAVING day_count > 0
         )
-    ''')
+    ''', te_date_params)
     avg_days_row = cursor.fetchone()
 
-    # Revenue by year
-    cursor.execute('''
-        SELECT SUBSTR(invoice_date, 1, 4) as year,
-               SUM(total_labor) as total_labor,
-               SUM(total_materials) as total_materials,
-               SUM(total_amount) as total_revenue
-        FROM invoices
-        WHERE invoice_date IS NOT NULL
-        GROUP BY year
-        ORDER BY year
-    ''')
-    revenue_by_year = rows_to_list(cursor.fetchall())
+    # Revenue by year (or by month when a date range is active)
+    if start or end:
+        cursor.execute(f'''
+            SELECT SUBSTR(COALESCE(i.invoice_date, j.start_date), 1, 7) as month,
+                   SUM(i.total_labor) as total_labor,
+                   SUM(i.total_materials) as total_materials,
+                   SUM(i.total_amount) as total_revenue
+            FROM invoices i
+            LEFT JOIN jobs j ON i.job_id = j.id
+            WHERE COALESCE(i.invoice_date, j.start_date) IS NOT NULL {inv_date_filter}
+            GROUP BY month
+            ORDER BY month
+        ''', inv_date_params)
+        revenue_by_period = rows_to_list(cursor.fetchall())
+        period_key = 'revenue_by_month'
+    else:
+        cursor.execute('''
+            SELECT SUBSTR(invoice_date, 1, 4) as year,
+                   SUM(total_labor) as total_labor,
+                   SUM(total_materials) as total_materials,
+                   SUM(total_amount) as total_revenue
+            FROM invoices
+            WHERE invoice_date IS NOT NULL
+            GROUP BY year
+            ORDER BY year
+        ''')
+        revenue_by_period = rows_to_list(cursor.fetchall())
+        period_key = 'revenue_by_year'
 
-    # Recent jobs - fixed field names to match frontend
-    cursor.execute('''
+    # Recent jobs
+    cursor.execute(f'''
         SELECT j.id, j.invoice_id, c.name as customer_name, j.start_date, j.status,
                COALESCE(i.total_labor, 0) as total_labor,
                COALESCE(i.total_materials, 0) as total_materials,
@@ -97,47 +220,51 @@ def dashboard():
         FROM jobs j
         JOIN customers c ON j.customer_id = c.id
         LEFT JOIN invoices i ON j.id = i.job_id
+        WHERE 1=1 {job_date_filter}
         ORDER BY j.start_date DESC
         LIMIT 10
-    ''')
+    ''', job_date_params)
     recent_jobs = rows_to_list(cursor.fetchall())
 
     # Top customers by labor revenue
-    cursor.execute('''
+    cursor.execute(f'''
         SELECT c.id, c.name,
                COUNT(DISTINCT j.id) as job_count,
                COALESCE(SUM(i.total_labor), 0) as total_revenue,
-               COALESCE(SUM(te.hours), 0) as total_hours
+               COALESCE(SUM(te_sub.hours), 0) as total_hours
         FROM customers c
-        LEFT JOIN jobs j ON c.id = j.customer_id
+        LEFT JOIN jobs j ON c.id = j.customer_id {("AND j.start_date BETWEEN ? AND ?" if (start and end) else ("AND j.start_date >= ?" if start else ("AND j.start_date <= ?" if end else "")))}
         LEFT JOIN invoices i ON j.id = i.job_id
         LEFT JOIN (
-            SELECT customer_id, SUM(hours) as hours FROM time_entries GROUP BY customer_id
-        ) te ON c.id = te.customer_id
+            SELECT customer_id, SUM(hours) as hours FROM time_entries
+            WHERE 1=1 {te_date_filter}
+            GROUP BY customer_id
+        ) te_sub ON c.id = te_sub.customer_id
         WHERE c.name != '_UNASSIGNED'
         GROUP BY c.id
         HAVING total_revenue > 0
         ORDER BY total_revenue DESC
         LIMIT 8
-    ''')
+    ''', job_date_params + te_date_params)
     top_customers = rows_to_list(cursor.fetchall())
 
-    # Revenue by service category with avg days
-    cursor.execute('''
+    # Revenue by service category
+    cursor.execute(f'''
         SELECT sp.category,
                COUNT(DISTINCT sp.job_id) as job_count,
                SUM(sp.amount) as total_revenue,
                ROUND(AVG(sp.amount), 2) as avg_revenue
         FROM services_performed sp
-        WHERE sp.service_type = 'labor' AND sp.category IS NOT NULL
+        JOIN jobs j ON sp.job_id = j.id
+        WHERE sp.service_type = 'labor' AND sp.category IS NOT NULL {sp_date_filter}
         GROUP BY sp.category
         ORDER BY total_revenue DESC
         LIMIT 12
-    ''')
+    ''', sp_date_params)
     by_category = rows_to_list(cursor.fetchall())
 
-    # Estimation accuracy (jobs where estimated_days is set and have actual time entries)
-    cursor.execute('''
+    # Estimation accuracy
+    cursor.execute(f'''
         SELECT COUNT(*) as total,
                SUM(CASE WHEN actual_days <= estimated_days THEN 1 ELSE 0 END) as on_time,
                ROUND(AVG(estimated_days), 1) as avg_estimated,
@@ -147,10 +274,10 @@ def dashboard():
                    COUNT(DISTINCT te.entry_date) as actual_days
             FROM jobs j
             JOIN time_entries te ON te.job_id = j.id
-            WHERE j.estimated_days IS NOT NULL AND j.estimated_days > 0
+            WHERE j.estimated_days IS NOT NULL AND j.estimated_days > 0 {job_date_filter}
             GROUP BY j.id
         )
-    ''')
+    ''', job_date_params)
     est_row = cursor.fetchone()
 
     conn.close()
@@ -158,7 +285,7 @@ def dashboard():
     total_hours = hours['total'] or 0
     total_labor = revenue['labor'] or 0
 
-    return jsonify({
+    response = {
         'total_labor': total_labor,
         'total_materials': revenue['materials'] or 0,
         'total_revenue': total_labor + (revenue['materials'] or 0),
@@ -168,7 +295,10 @@ def dashboard():
         'customer_count': customers['count'],
         'job_count': jobs_count['count'],
         'invoice_count': invoice_count['count'],
-        'revenue_by_year': revenue_by_year,
+        period_key: revenue_by_period,
+        # Always include both keys so frontend can check either
+        'revenue_by_year': revenue_by_period if period_key == 'revenue_by_year' else [],
+        'revenue_by_month': revenue_by_period if period_key == 'revenue_by_month' else [],
         'recent_jobs': recent_jobs,
         'top_customers': top_customers,
         'revenue_by_category': by_category,
@@ -177,8 +307,10 @@ def dashboard():
             'on_time': est_row['on_time'] if est_row else 0,
             'avg_estimated_days': est_row['avg_estimated'] if est_row else None,
             'avg_actual_days': est_row['avg_actual'] if est_row else None,
-        }
-    })
+        },
+        'date_range': date_range,
+    }
+    return jsonify(response)
 
 
 # ============================================================
@@ -246,10 +378,10 @@ def update_customer(customer_id):
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('''
-        UPDATE customers SET name = ?, phone = ?, email = ?, address = ?, notes = ?
+        UPDATE customers SET name = ?, phone = ?, email = ?, address = ?, notes = ?, cya_notes = ?
         WHERE id = ?
     ''', (data.get('name'), data.get('phone'), data.get('email'),
-          data.get('address'), data.get('notes'), customer_id))
+          data.get('address'), data.get('notes'), data.get('cya_notes'), customer_id))
     conn.commit()
     conn.close()
     return jsonify({'id': customer_id, 'message': 'Customer updated'})
@@ -730,11 +862,11 @@ def filing_cabinet_update(job_id):
     cursor = conn.cursor()
 
     try:
-        # Update job notes/status/estimated_days
+        # Update job notes/status/estimated_days/photos_album_url
         cursor.execute('''
-            UPDATE jobs SET customer_id = ?, notes = ?, estimated_days = ? WHERE id = ?
+            UPDATE jobs SET customer_id = ?, notes = ?, estimated_days = ?, photos_album_url = ? WHERE id = ?
         ''', (data.get('customer_id'), data.get('notes', ''),
-              data.get('estimated_days'), job_id))
+              data.get('estimated_days'), data.get('photos_album_url'), job_id))
 
         # Update customer contact info if provided
         customer = data.get('customer', {})
@@ -1442,6 +1574,514 @@ def pricing_suggest_all():
 
     conn.close()
     return jsonify(result)
+
+
+# ============================================================
+# TRIPS
+# ============================================================
+
+TRIP_TYPES = ['job_site', 'supply_planned', 'supply_unplanned', 'other']
+
+
+@app.route('/api/trips')
+def list_trips():
+    conn = get_db()
+    cursor = conn.cursor()
+
+    start = request.args.get('start')
+    end = request.args.get('end')
+    trip_type = request.args.get('type')
+    customer_id = request.args.get('customer_id')
+    job_id = request.args.get('job_id')
+
+    query = '''
+        SELECT t.id, t.trip_date, t.trip_type, t.destination,
+               t.customer_id, t.job_id, t.miles, t.drive_time_minutes,
+               t.notes, t.created_at,
+               c.name as customer_name,
+               COALESCE(i.invoice_number, j.invoice_id) as job_number
+        FROM trips t
+        LEFT JOIN customers c ON t.customer_id = c.id
+        LEFT JOIN jobs j ON t.job_id = j.id
+        LEFT JOIN invoices i ON j.id = i.job_id
+        WHERE 1=1
+    '''
+    params = []
+
+    if start:
+        query += ' AND t.trip_date >= ?'
+        params.append(start)
+    if end:
+        query += ' AND t.trip_date <= ?'
+        params.append(end)
+    if trip_type:
+        query += ' AND t.trip_type = ?'
+        params.append(trip_type)
+    if customer_id:
+        query += ' AND t.customer_id = ?'
+        params.append(customer_id)
+    if job_id:
+        query += ' AND t.job_id = ?'
+        params.append(job_id)
+
+    query += ' ORDER BY t.trip_date DESC, t.id DESC LIMIT 500'
+    cursor.execute(query, params)
+    trips = rows_to_list(cursor.fetchall())
+    conn.close()
+    return jsonify(trips)
+
+
+@app.route('/api/trips', methods=['POST'])
+def create_trip():
+    data = request.json
+    if not data or not data.get('trip_date') or not data.get('trip_type'):
+        return jsonify({'error': 'trip_date and trip_type are required'}), 400
+    if data['trip_type'] not in TRIP_TYPES:
+        return jsonify({'error': f'trip_type must be one of: {", ".join(TRIP_TYPES)}'}), 400
+
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO trips (trip_date, trip_type, destination, customer_id, job_id,
+                           miles, drive_time_minutes, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (data['trip_date'], data['trip_type'], data.get('destination'),
+          data.get('customer_id'), data.get('job_id'),
+          data.get('miles'), data.get('drive_time_minutes'), data.get('notes', '')))
+    trip_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return jsonify({'id': trip_id, 'message': 'Trip logged'}), 201
+
+
+@app.route('/api/trips/<int:trip_id>', methods=['PUT'])
+def update_trip(trip_id):
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data provided'}), 400
+
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT id FROM trips WHERE id = ?', (trip_id,))
+    if not cursor.fetchone():
+        conn.close()
+        return jsonify({'error': 'Trip not found'}), 404
+
+    if data.get('trip_type') and data['trip_type'] not in TRIP_TYPES:
+        conn.close()
+        return jsonify({'error': f'trip_type must be one of: {", ".join(TRIP_TYPES)}'}), 400
+
+    cursor.execute('''
+        UPDATE trips SET trip_date = ?, trip_type = ?, destination = ?, customer_id = ?,
+                         job_id = ?, miles = ?, drive_time_minutes = ?, notes = ?
+        WHERE id = ?
+    ''', (data.get('trip_date'), data.get('trip_type'), data.get('destination'),
+          data.get('customer_id'), data.get('job_id'), data.get('miles'),
+          data.get('drive_time_minutes'), data.get('notes', ''), trip_id))
+    conn.commit()
+    conn.close()
+    return jsonify({'id': trip_id, 'message': 'Trip updated'})
+
+
+@app.route('/api/trips/<int:trip_id>', methods=['DELETE'])
+def delete_trip(trip_id):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT id FROM trips WHERE id = ?', (trip_id,))
+    if not cursor.fetchone():
+        conn.close()
+        return jsonify({'error': 'Trip not found'}), 404
+    cursor.execute('DELETE FROM trips WHERE id = ?', (trip_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'message': 'Trip deleted'})
+
+
+@app.route('/api/trips/summary')
+def trips_summary():
+    conn = get_db()
+    cursor = conn.cursor()
+
+    start = request.args.get('start')
+    end = request.args.get('end')
+
+    date_filter = ''
+    date_params = []
+    if start and end:
+        date_filter = 'AND trip_date BETWEEN ? AND ?'
+        date_params = [start, end]
+    elif start:
+        date_filter = 'AND trip_date >= ?'
+        date_params = [start]
+    elif end:
+        date_filter = 'AND trip_date <= ?'
+        date_params = [end]
+
+    # Overall totals
+    cursor.execute(f'''
+        SELECT COALESCE(SUM(miles), 0) as total_miles,
+               COALESCE(SUM(drive_time_minutes), 0) as total_drive_minutes
+        FROM trips WHERE 1=1 {date_filter}
+    ''', date_params)
+    totals = cursor.fetchone()
+
+    # By trip type
+    cursor.execute(f'''
+        SELECT trip_type,
+               COUNT(*) as count,
+               COALESCE(SUM(miles), 0) as miles,
+               COALESCE(SUM(drive_time_minutes), 0) as drive_minutes
+        FROM trips WHERE 1=1 {date_filter}
+        GROUP BY trip_type
+        ORDER BY miles DESC
+    ''', date_params)
+    by_type = rows_to_list(cursor.fetchall())
+
+    # Monthly breakdown
+    cursor.execute(f'''
+        SELECT SUBSTR(trip_date, 1, 7) as month,
+               COALESCE(SUM(miles), 0) as miles,
+               COUNT(*) as trips
+        FROM trips WHERE 1=1 {date_filter}
+        GROUP BY month
+        ORDER BY month
+    ''', date_params)
+    monthly = rows_to_list(cursor.fetchall())
+
+    conn.close()
+
+    total_miles = totals['total_miles'] or 0
+    irs_rate = 0.70  # 2026 IRS mileage rate
+    return jsonify({
+        'total_miles': total_miles,
+        'total_drive_minutes': totals['total_drive_minutes'] or 0,
+        'by_type': by_type,
+        'monthly': monthly,
+        'irs_deduction_estimate': round(total_miles * irs_rate, 2),
+    })
+
+
+# ============================================================
+# P&L REPORT
+# ============================================================
+
+@app.route('/api/reports/pl')
+def pl_report():
+    """Profit & Loss report with optional date range, customer, and category filters."""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    start = request.args.get('start')
+    end = request.args.get('end')
+    filter_customer_id = request.args.get('customer_id')
+    filter_category = request.args.get('category')
+
+    # Build date filter clauses
+    if start and end:
+        inv_df = 'AND COALESCE(i.invoice_date, j.start_date) BETWEEN ? AND ?'
+        inv_dp = [start, end]
+        exp_df = 'AND COALESCE(e.expense_date, DATE(e.created_at)) BETWEEN ? AND ?'
+        exp_dp = [start, end]
+        te_df = 'AND te.date BETWEEN ? AND ?'
+        te_dp = [start, end]
+        trip_df = 'AND t.trip_date BETWEEN ? AND ?'
+        trip_dp = [start, end]
+        job_df = 'AND j.start_date BETWEEN ? AND ?'
+        job_dp = [start, end]
+    elif start:
+        inv_df = 'AND COALESCE(i.invoice_date, j.start_date) >= ?'
+        inv_dp = [start]
+        exp_df = 'AND COALESCE(e.expense_date, DATE(e.created_at)) >= ?'
+        exp_dp = [start]
+        te_df = 'AND te.date >= ?'
+        te_dp = [start]
+        trip_df = 'AND t.trip_date >= ?'
+        trip_dp = [start]
+        job_df = 'AND j.start_date >= ?'
+        job_dp = [start]
+    elif end:
+        inv_df = 'AND COALESCE(i.invoice_date, j.start_date) <= ?'
+        inv_dp = [end]
+        exp_df = 'AND COALESCE(e.expense_date, DATE(e.created_at)) <= ?'
+        exp_dp = [end]
+        te_df = 'AND te.date <= ?'
+        te_dp = [end]
+        trip_df = 'AND t.trip_date <= ?'
+        trip_dp = [end]
+        job_df = 'AND j.start_date <= ?'
+        job_dp = [end]
+    else:
+        inv_df = ''
+        inv_dp = []
+        exp_df = ''
+        exp_dp = []
+        te_df = ''
+        te_dp = []
+        trip_df = ''
+        trip_dp = []
+        job_df = ''
+        job_dp = []
+
+    # Optional customer filter
+    cust_inv_df = ''
+    cust_inv_dp = []
+    cust_exp_df = ''
+    cust_exp_dp = []
+    cust_te_df = ''
+    cust_te_dp = []
+    if filter_customer_id:
+        cust_inv_df = 'AND i.customer_id = ?'
+        cust_inv_dp = [filter_customer_id]
+        cust_exp_df = 'AND e.customer_id = ?'
+        cust_exp_dp = [filter_customer_id]
+        cust_te_df = 'AND te.customer_id = ?'
+        cust_te_dp = [filter_customer_id]
+
+    # Optional category filter (join through services_performed)
+    cat_inv_df = ''
+    cat_inv_dp = []
+    if filter_category:
+        cat_inv_df = 'AND EXISTS (SELECT 1 FROM services_performed sp WHERE sp.job_id = j.id AND sp.category = ?)'
+        cat_inv_dp = [filter_category]
+
+    # --- Revenue summary ---
+    cursor.execute(f'''
+        SELECT COALESCE(SUM(i.total_labor), 0) as total_labor,
+               COALESCE(SUM(i.total_materials), 0) as total_materials,
+               COALESCE(SUM(i.total_amount), 0) as total_amount,
+               COUNT(DISTINCT i.id) as job_count
+        FROM invoices i
+        LEFT JOIN jobs j ON i.job_id = j.id
+        WHERE 1=1 {inv_df} {cust_inv_df} {cat_inv_df}
+    ''', inv_dp + cust_inv_dp + cat_inv_dp)
+    rev_row = cursor.fetchone()
+
+    # --- Expenses summary ---
+    cursor.execute(f'''
+        SELECT COALESCE(SUM(CASE WHEN e.is_overhead = 1 THEN e.cost ELSE 0 END), 0) as total_overhead,
+               COALESCE(SUM(CASE WHEN e.is_overhead = 0 THEN e.cost ELSE 0 END), 0) as total_job_expenses,
+               COALESCE(SUM(e.cost), 0) as total_expenses
+        FROM materials_expenses e
+        WHERE 1=1 {exp_df} {cust_exp_df}
+    ''', exp_dp + cust_exp_dp)
+    exp_row = cursor.fetchone()
+
+    # --- Hours summary ---
+    cursor.execute(f'''
+        SELECT COALESCE(SUM(te.hours), 0) as total_hours
+        FROM time_entries te
+        WHERE 1=1 {te_df} {cust_te_df}
+    ''', te_dp + cust_te_dp)
+    hours_row = cursor.fetchone()
+
+    # --- Mileage deduction (from trips) ---
+    cursor.execute(f'''
+        SELECT COALESCE(SUM(t.miles), 0) as total_miles
+        FROM trips t
+        WHERE 1=1 {trip_df}
+    ''', trip_dp)
+    miles_row = cursor.fetchone()
+    total_miles = miles_row['total_miles'] or 0
+    mileage_deduction = round(total_miles * 0.70, 2)
+
+    # --- By month ---
+    cursor.execute(f'''
+        SELECT SUBSTR(COALESCE(i.invoice_date, j.start_date), 1, 7) as month,
+               COALESCE(SUM(i.total_amount), 0) as revenue,
+               COUNT(DISTINCT i.id) as job_count
+        FROM invoices i
+        LEFT JOIN jobs j ON i.job_id = j.id
+        WHERE COALESCE(i.invoice_date, j.start_date) IS NOT NULL {inv_df} {cust_inv_df} {cat_inv_df}
+        GROUP BY month
+        ORDER BY month
+    ''', inv_dp + cust_inv_dp + cat_inv_dp)
+    by_month_rev = {r['month']: dict(r) for r in cursor.fetchall()}
+
+    cursor.execute(f'''
+        SELECT SUBSTR(COALESCE(e.expense_date, DATE(e.created_at)), 1, 7) as month,
+               COALESCE(SUM(e.cost), 0) as expenses
+        FROM materials_expenses e
+        WHERE 1=1 {exp_df} {cust_exp_df}
+        GROUP BY month
+    ''', exp_dp + cust_exp_dp)
+    by_month_exp = {r['month']: r['expenses'] for r in cursor.fetchall()}
+
+    cursor.execute(f'''
+        SELECT SUBSTR(te.date, 1, 7) as month,
+               COALESCE(SUM(te.hours), 0) as hours
+        FROM time_entries te
+        WHERE 1=1 {te_df} {cust_te_df}
+        GROUP BY month
+    ''', te_dp + cust_te_dp)
+    by_month_hours = {r['month']: r['hours'] for r in cursor.fetchall()}
+
+    all_months = sorted(set(list(by_month_rev.keys()) + list(by_month_exp.keys()) + list(by_month_hours.keys())))
+    by_month = []
+    for m in all_months:
+        rev = by_month_rev.get(m, {}).get('revenue', 0) or 0
+        exp = by_month_exp.get(m, 0) or 0
+        hrs = by_month_hours.get(m, 0) or 0
+        by_month.append({
+            'month': m,
+            'revenue': round(rev, 2),
+            'expenses': round(exp, 2),
+            'profit': round(rev - exp, 2),
+            'hours': round(hrs, 2),
+        })
+
+    # --- By customer ---
+    cursor.execute(f'''
+        SELECT c.id as customer_id, c.name as customer_name,
+               COALESCE(SUM(i.total_amount), 0) as revenue,
+               COUNT(DISTINCT j.id) as job_count
+        FROM customers c
+        JOIN jobs j ON j.customer_id = c.id
+        JOIN invoices i ON i.job_id = j.id
+        WHERE c.name != '_UNASSIGNED' {inv_df} {cat_inv_df}
+        GROUP BY c.id
+        ORDER BY revenue DESC
+    ''', inv_dp + cat_inv_dp)
+    by_customer_rev = {r['customer_id']: dict(r) for r in cursor.fetchall()}
+
+    cursor.execute(f'''
+        SELECT e.customer_id, COALESCE(SUM(e.cost), 0) as expenses
+        FROM materials_expenses e
+        WHERE e.customer_id IS NOT NULL {exp_df}
+        GROUP BY e.customer_id
+    ''', exp_dp)
+    by_customer_exp = {r['customer_id']: r['expenses'] for r in cursor.fetchall()}
+
+    cursor.execute(f'''
+        SELECT te.customer_id, COALESCE(SUM(te.hours), 0) as hours
+        FROM time_entries te
+        WHERE te.customer_id IS NOT NULL {te_df}
+        GROUP BY te.customer_id
+    ''', te_dp)
+    by_customer_hours = {r['customer_id']: r['hours'] for r in cursor.fetchall()}
+
+    cursor.execute(f'''
+        SELECT t.customer_id, COALESCE(SUM(t.miles), 0) as miles
+        FROM trips t
+        WHERE t.customer_id IS NOT NULL {trip_df}
+        GROUP BY t.customer_id
+    ''', trip_dp)
+    by_customer_miles = {r['customer_id']: r['miles'] for r in cursor.fetchall()}
+
+    by_customer = []
+    for cid, row in by_customer_rev.items():
+        rev = row['revenue'] or 0
+        exp = by_customer_exp.get(cid, 0) or 0
+        hrs = by_customer_hours.get(cid, 0) or 0
+        mi = by_customer_miles.get(cid, 0) or 0
+        by_customer.append({
+            'customer_id': cid,
+            'customer_name': row['customer_name'],
+            'revenue': round(rev, 2),
+            'expenses': round(exp, 2),
+            'profit': round(rev - exp, 2),
+            'hours': round(hrs, 2),
+            'job_count': row['job_count'],
+            'miles': round(mi, 2),
+        })
+
+    # --- By service category ---
+    cursor.execute(f'''
+        SELECT sp.category,
+               COALESCE(SUM(sp.amount), 0) as revenue,
+               COUNT(DISTINCT sp.job_id) as job_count
+        FROM services_performed sp
+        JOIN jobs j ON sp.job_id = j.id
+        WHERE sp.service_type = 'labor' AND sp.category IS NOT NULL {job_df} {('AND j.customer_id = ?' if filter_customer_id else '')}
+        GROUP BY sp.category
+        ORDER BY revenue DESC
+    ''', job_dp + ([filter_customer_id] if filter_customer_id else []))
+    by_category_raw = rows_to_list(cursor.fetchall())
+
+    cursor.execute(f'''
+        SELECT sp.category, COALESCE(SUM(te.hours), 0) as hours
+        FROM services_performed sp
+        JOIN time_entries te ON te.job_id = sp.job_id
+        JOIN jobs j ON sp.job_id = j.id
+        WHERE sp.service_type = 'labor' AND sp.category IS NOT NULL {job_df}
+        GROUP BY sp.category
+    ''', job_dp)
+    by_category_hours = {r['category']: r['hours'] for r in cursor.fetchall()}
+
+    by_category_list = []
+    for r in by_category_raw:
+        cat = r['category']
+        rev = r['revenue'] or 0
+        jc = r['job_count'] or 0
+        hrs = by_category_hours.get(cat, 0) or 0
+        by_category_list.append({
+            'category': cat,
+            'revenue': round(rev, 2),
+            'hours': round(hrs, 2),
+            'job_count': jc,
+            'avg_per_job': round(rev / jc, 2) if jc > 0 else 0,
+        })
+
+    # --- Expenses by category ---
+    cursor.execute(f'''
+        SELECT COALESCE(expense_category, 'Uncategorized') as expense_category,
+               COALESCE(SUM(cost), 0) as total,
+               COUNT(*) as count,
+               MAX(is_overhead) as is_overhead
+        FROM materials_expenses e
+        WHERE 1=1 {exp_df} {cust_exp_df}
+        GROUP BY expense_category
+        ORDER BY total DESC
+    ''', exp_dp + cust_exp_dp)
+    expenses_by_category = rows_to_list(cursor.fetchall())
+
+    # --- Waste indicators (unplanned supply trips) ---
+    cursor.execute(f'''
+        SELECT COUNT(*) as count, COALESCE(SUM(miles), 0) as miles
+        FROM trips t
+        WHERE t.trip_type = 'supply_unplanned' {trip_df}
+    ''', trip_dp)
+    waste_row = cursor.fetchone()
+    unplanned_miles = waste_row['miles'] or 0
+    unplanned_count = waste_row['count'] or 0
+    unplanned_cost = round(unplanned_miles * 0.70, 2)
+
+    conn.close()
+
+    total_revenue = rev_row['total_amount'] or 0
+    total_labor_rev = rev_row['total_labor'] or 0
+    total_materials_rev = rev_row['total_materials'] or 0
+    total_expenses = exp_row['total_expenses'] or 0
+    total_overhead = exp_row['total_overhead'] or 0
+    total_job_expenses = exp_row['total_job_expenses'] or 0
+    total_hours = hours_row['total_hours'] or 0
+    net_profit = total_revenue - total_expenses
+    effective_rate = round(total_labor_rev / total_hours, 2) if total_hours > 0 else 0
+
+    return jsonify({
+        'summary': {
+            'total_revenue': round(total_revenue, 2),
+            'total_labor_revenue': round(total_labor_rev, 2),
+            'total_materials_revenue': round(total_materials_rev, 2),
+            'total_expenses': round(total_expenses, 2),
+            'total_overhead': round(total_overhead, 2),
+            'total_job_expenses': round(total_job_expenses, 2),
+            'net_profit': round(net_profit, 2),
+            'total_hours': round(total_hours, 2),
+            'effective_hourly_rate': effective_rate,
+            'job_count': rev_row['job_count'] or 0,
+            'mileage_deduction_estimate': mileage_deduction,
+        },
+        'by_month': by_month,
+        'by_customer': by_customer,
+        'by_category': by_category_list,
+        'expenses_by_category': expenses_by_category,
+        'waste_indicators': {
+            'unplanned_supply_trips': unplanned_count,
+            'unplanned_supply_miles': round(unplanned_miles, 2),
+            'unplanned_trip_cost_estimate': unplanned_cost,
+        },
+        'date_range': {'start': start, 'end': end},
+    })
 
 
 # ============================================================

@@ -15,7 +15,7 @@ export default function Customers() {
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [showForm, setShowForm] = useState(false)
-  const [form, setForm] = useState({ name: '', address: '', phone: '', email: '', notes: '' })
+  const [form, setForm] = useState({ name: '', address: '', phone: '', email: '', notes: '', cya_notes: '' })
   const [saving, setSaving] = useState(false)
   const [calcMileage, setCalcMileage] = useState(false)
 
@@ -56,7 +56,7 @@ export default function Customers() {
       const listR = await fetch('/api/customers')
       const listData = await listR.json()
       setCustomers(Array.isArray(listData) ? listData : (listData.customers || []))
-      setForm({ name: '', address: '', phone: '', email: '', notes: '' })
+      setForm({ name: '', address: '', phone: '', email: '', notes: '', cya_notes: '' })
       setShowForm(false)
       setSelected({ id: newC.id, name: newC.name })
     } catch (e) {
@@ -118,6 +118,11 @@ export default function Customers() {
                 <span>{c.job_count || 0} jobs</span>
                 {c.total_revenue > 0 && <span className="text-green-600">{fmt(c.total_revenue)}</span>}
               </div>
+              {c.cya_notes && (
+                <div className="text-xs text-amber-700 mt-0.5 truncate">
+                  {c.cya_notes.slice(0, 60)}{c.cya_notes.length > 60 ? '...' : ''}
+                </div>
+              )}
             </button>
           ))}
           {filtered.length === 0 && (
@@ -185,6 +190,19 @@ export default function Customers() {
                   placeholder="Any notes..."
                 />
               </div>
+              <div className="col-span-2">
+                <label className="block text-xs font-medium text-gray-700 mb-1">
+                  CYA Notes
+                  <span className="ml-1 font-normal text-gray-400">— gate codes, pets, preferences, warnings</span>
+                </label>
+                <textarea
+                  value={form.cya_notes}
+                  onChange={e => setForm(f => ({ ...f, cya_notes: e.target.value }))}
+                  rows={3}
+                  className="w-full border border-amber-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400 bg-amber-50"
+                  placeholder="Dog in backyard, gate code is 1234, prefers text not call..."
+                />
+              </div>
             </div>
             <div className="flex gap-3 mt-4">
               <button
@@ -219,6 +237,7 @@ export default function Customers() {
             fmt={fmt}
             onCalcMileage={() => handleCalcMileage(selected.id)}
             calcMileage={calcMileage}
+            onDetailChange={setDetail}
           />
         )}
       </div>
@@ -226,10 +245,31 @@ export default function Customers() {
   )
 }
 
-function CustomerDetail({ customer, detail, fmt, onCalcMileage, calcMileage }) {
+function CustomerDetail({ customer, detail, fmt, onCalcMileage, calcMileage, onDetailChange }) {
   if (!detail) return (
     <div className="flex items-center justify-center h-32 text-gray-400">Loading...</div>
   )
+
+  const [saving, setSaving] = useState(false)
+  const [cyaNotes, setCyaNotes] = useState(detail.cya_notes || '')
+
+  async function handleSaveCya() {
+    setSaving(true)
+    try {
+      await fetch(`/api/customers/${customer.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cya_notes: cyaNotes }),
+      })
+      if (onDetailChange) onDetailChange({ ...detail, cya_notes: cyaNotes })
+    } catch {
+      alert('Error saving notes')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const cyaChanged = cyaNotes !== (detail.cya_notes || '')
 
   const totalRevenue = detail.jobs?.reduce((s, j) => s + (j.total_amount || 0), 0) || 0
   const totalHours = detail.time_entries?.reduce((s, t) => s + (t.hours || 0), 0) || 0
@@ -290,6 +330,30 @@ function CustomerDetail({ customer, detail, fmt, onCalcMileage, calcMileage }) {
           </Link>
         </div>
         {detail.notes && <p className="mt-3 text-sm text-gray-600 bg-gray-50 rounded-lg p-3">{detail.notes}</p>}
+
+        {/* CYA Notes */}
+        <div className="mt-4 border border-amber-300 rounded-xl bg-amber-50 p-4">
+          <div className="mb-2">
+            <span className="text-sm font-semibold text-amber-900">CYA Notes</span>
+            <span className="ml-2 text-xs text-amber-700">Cover Your Ass — gate codes, pets, preferences, warnings</span>
+          </div>
+          <textarea
+            rows={4}
+            value={cyaNotes}
+            onChange={e => setCyaNotes(e.target.value)}
+            placeholder="Dog in backyard, gate code is 1234, prefers text not call, gets upset if you're late..."
+            className="w-full border border-amber-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400 bg-amber-50 placeholder-amber-400 text-amber-900 resize-y"
+          />
+          {cyaChanged && (
+            <button
+              onClick={handleSaveCya}
+              disabled={saving}
+              className="mt-2 bg-amber-600 text-white px-4 py-1.5 rounded-lg text-sm hover:bg-amber-700 disabled:opacity-50 font-medium"
+            >
+              {saving ? 'Saving...' : 'Save Notes'}
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Stats */}

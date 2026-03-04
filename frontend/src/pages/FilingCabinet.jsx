@@ -1,6 +1,17 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 
+function useCopyToClipboard() {
+  const [copied, setCopied] = useState(false)
+  function copy(text) {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    }).catch(() => {})
+  }
+  return [copied, copy]
+}
+
 const API = '/api'
 const fmt = n => `$${(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 const fmtHours = h => `${(h || 0).toFixed(1)}h`
@@ -127,6 +138,7 @@ export default function FilingCabinet() {
         status: detail.status,
         services: detail.services,
         time_entries: detail.time_entries,
+        photos_album_url: detail.photos_album_url || null,
         customer: {
           name:    detail.customer_name,
           phone:   detail.customer_phone,
@@ -286,6 +298,8 @@ export default function FilingCabinet() {
 
   const isEstimate = detail?.status === 'estimate'
 
+  const [linkCopied, copyLink] = useCopyToClipboard()
+
   // ─────────────────────────────────────────────────────────────
   return (
     <div className="flex h-full gap-0 -m-6">
@@ -384,10 +398,10 @@ export default function FilingCabinet() {
           <div className="p-6 space-y-4 max-w-4xl">
 
             {/* ── TOOLBAR ────────────────────────────────────────── */}
-            <div className="flex items-start justify-between gap-4">
+            <div className="flex items-start justify-between gap-4 flex-wrap">
               <div>
                 <h2 className="text-2xl font-bold text-gray-900">{detail.customer_name}</h2>
-                <div className="text-sm text-gray-500 mt-0.5 flex items-center gap-2">
+                <div className="text-sm text-gray-500 mt-0.5 flex items-center gap-2 flex-wrap">
                   <span className="font-mono">{detail.invoice_number}</span>
                   <span>·</span>
                   <span>{detail.invoice_date || detail.start_date}</span>
@@ -395,13 +409,23 @@ export default function FilingCabinet() {
                   <StatusBadge status={detail.status} />
                 </div>
               </div>
-              <div className="flex gap-2 flex-shrink-0">
-                <Link
-                  to={`/print/${detail.job_id}`}
+              <div className="flex flex-wrap gap-2 flex-shrink-0">
+                <button
+                  onClick={() => window.open(`/print/${detail.job_id}`, '_blank')}
                   className="bg-white border border-gray-200 text-gray-700 px-4 py-2 rounded-lg text-sm hover:bg-gray-50 font-medium"
                 >
-                  Print
-                </Link>
+                  Preview {isEstimate ? 'Estimate' : 'Invoice'}
+                </button>
+                <button
+                  onClick={() => copyLink(window.location.origin + '/print/' + detail.job_id)}
+                  className={`px-4 py-2 rounded-lg text-sm font-medium border transition-colors ${
+                    linkCopied
+                      ? 'bg-green-100 border-green-300 text-green-700'
+                      : 'bg-white border-gray-200 text-gray-700 hover:bg-gray-50'
+                  }`}
+                >
+                  {linkCopied ? 'Copied!' : 'Copy Print Link'}
+                </button>
                 {edited && (
                   <button
                     onClick={handleSave}
@@ -541,6 +565,26 @@ export default function FilingCabinet() {
                     placeholder="Job notes..."
                     className={INPUT}
                   />
+                </div>
+                <div className="col-span-3">
+                  <label className="block text-xs text-gray-400 mb-1">Google Photos Album</label>
+                  <input
+                    type="url"
+                    value={detail.photos_album_url || ''}
+                    onChange={e => setField('photos_album_url', e.target.value)}
+                    placeholder="Paste Google Photos album link..."
+                    className={INPUT}
+                  />
+                  {detail.photos_album_url && (
+                    <a
+                      href={detail.photos_album_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-block mt-1 text-xs text-blue-600 hover:text-blue-800 hover:underline"
+                    >
+                      Open album →
+                    </a>
+                  )}
                 </div>
               </div>
             </div>
