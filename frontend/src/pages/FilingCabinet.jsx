@@ -5,7 +5,11 @@ const API = '/api'
 const fmt = n => `$${(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 const fmtHours = h => `${(h || 0).toFixed(1)}h`
 
-// Format a start_time like "2024-03-21 07:30:00" -> "7:30 AM"
+const UOM_OPTIONS = [
+  'each', 'sq.ft.', 'lin.ft.', 'hr', 'day', 'cu.yd.', 'sq.yd.',
+  'piece', 'bag', 'gallon', 'roll', 'sheet', 'bundle', 'load',
+]
+
 function fmtTime(ts) {
   if (!ts) return null
   const m = ts.match(/(\d{2}):(\d{2})/)
@@ -16,6 +20,13 @@ function fmtTime(ts) {
   if (h > 12) h -= 12
   if (h === 0) h = 12
   return `${h}:${min} ${ampm}`
+}
+
+function formatPhone(raw) {
+  const digits = (raw || '').replace(/\D/g, '').slice(0, 10)
+  if (digits.length < 4) return digits
+  if (digits.length < 7) return `(${digits.slice(0, 3)}) ${digits.slice(3)}`
+  return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`
 }
 
 const STATUS_COLORS = {
@@ -32,11 +43,16 @@ function StatusBadge({ status }) {
   )
 }
 
-const INPUT = 'w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white'
+const INPUT    = 'w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white'
 const INPUT_SM = 'w-full border border-gray-200 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 bg-white'
 
-// ─────────────────────────────────────────────────────────────────
-// Main component
+// The sidebar tabs and what statuses they match
+const TABS = [
+  { key: 'all',      label: 'All',       match: null },
+  { key: 'estimate', label: 'Estimates', match: ['estimate'] },
+  { key: 'invoice',  label: 'Invoices',  match: ['completed', 'paid', 'pending'] },
+]
+
 // ─────────────────────────────────────────────────────────────────
 export default function FilingCabinet() {
   const [jobs, setJobs]               = useState([])
@@ -48,11 +64,21 @@ export default function FilingCabinet() {
   const [search, setSearch]           = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
   const [saving, setSaving]           = useState(false)
-  const [converting, setConverting]   = useState(false)
   const [edited, setEdited]           = useState(false)
+  const [calcMileage, setCalcMileage] = useState(false)
 
-  // Load sidebar + categories on mount
+  // Payment form state
+  const [paymentForm, setPaymentForm] = useState({
+    amount: '', payment_method: 'cash', payment_date: new Date().toISOString().slice(0, 10), memo: '',
+  })
+  const [addingPayment, setAddingPayment] = useState(false)
+
   useEffect(() => {
+    // Check ?job= param
+    const params = new URLSearchParams(window.location.search)
+    const jobParam = params.get('job')
+    if (jobParam) setSelectedId(parseInt(jobParam))
+
     Promise.all([
       fetch(`${API}/filing-cabinet`).then(r => r.json()),
       fetch(`${API}/service-categories`).then(r => r.json()),
@@ -63,7 +89,6 @@ export default function FilingCabinet() {
     }).catch(() => setLoading(false))
   }, [])
 
-  // Load detail when a job is selected
   useEffect(() => {
     if (!selectedId) return
     setDetailLoading(true)
@@ -80,13 +105,14 @@ export default function FilingCabinet() {
     setJobs(data.jobs || data || [])
   }, [])
 
-  // Filtered sidebar list
+  // Filter sidebar
   const filtered = jobs.filter(j => {
     const q = search.toLowerCase()
     const matchSearch = !q ||
       (j.customer || '').toLowerCase().includes(q) ||
       (j.invoice_number || '').toLowerCase().includes(q)
-    const matchStatus = statusFilter === 'all' || j.status === statusFilter
+    const tab = TABS.find(t => t.key === statusFilter)
+    const matchStatus = !tab?.match || tab.match.includes(j.status)
     return matchSearch && matchStatus
   })
 
@@ -138,7 +164,6 @@ export default function FilingCabinet() {
           claim_time_entry_ids: [teId],
         }),
       })
-      // Refresh detail
       const r = await fetch(`${API}/filing-cabinet/${detail.job_id}`)
       setDetail(await r.json())
     } catch {
@@ -146,7 +171,7 @@ export default function FilingCabinet() {
     }
   }
 
-  // ── Reassign time entry to a different invoice ────────────────
+  // ── Reassign time entry ────────────────────────────────────────
   async function handleReassign(teId, newJobId) {
     try {
       await fetch(`${API}/time-entries/${teId}`, {
@@ -154,7 +179,6 @@ export default function FilingCabinet() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ job_id: newJobId }),
       })
-      // Refresh current job detail and sidebar
       const r = await fetch(`${API}/filing-cabinet/${detail.job_id}`)
       setDetail(await r.json())
       await refreshList()
@@ -163,24 +187,59 @@ export default function FilingCabinet() {
     }
   }
 
-  // ── Convert estimate -> invoice ───────────────────────────────
-  async function handleConvert() {
-    if (!detail) return
-    if (!confirm('Mark this estimate as a completed, paid invoice?')) return
-    setConverting(true)
+  // ── Add payment ───────────────────────────────────────────────
+  async function handleAddPayment() {
+    if (!detail || !paymentForm.amount) return
+    setAddingPayment(true)
     try {
-      await fetch(`${API}/jobs/${detail.job_id}/convert`, { method: 'POST' })
+      const r = await fetch(`${API}/jobs/${detail.job_id}/payments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(paymentForm),
+      })
+      if (!r.ok) throw new Error((await r.json()).error || 'Failed')
+      // Refresh full detail so payments + status update
+      const detail2 = await fetch(`${API}/filing-cabinet/${detail.job_id}`)
+      setDetail(await detail2.json())
+      setPaymentForm(prev => ({ ...prev, amount: '', memo: '' }))
+      await refreshList()
+    } catch (e) {
+      alert('Error adding payment: ' + e.message)
+    } finally {
+      setAddingPayment(false)
+    }
+  }
+
+  // ── Delete payment ─────────────────────────────────────────────
+  async function handleDeletePayment(paymentId) {
+    if (!confirm('Remove this payment?')) return
+    try {
+      await fetch(`${API}/payments/${paymentId}`, { method: 'DELETE' })
       const r = await fetch(`${API}/filing-cabinet/${detail.job_id}`)
       setDetail(await r.json())
       await refreshList()
     } catch {
-      alert('Error converting estimate')
-    } finally {
-      setConverting(false)
+      alert('Error removing payment')
     }
   }
 
-  // ── Helpers to mutate detail state ───────────────────────────
+  // ── Calculate mileage ─────────────────────────────────────────
+  async function handleCalcMileage() {
+    if (!detail?.customer_id) return
+    setCalcMileage(true)
+    try {
+      const r = await fetch(`${API}/customers/${detail.customer_id}/calculate-mileage`, { method: 'POST' })
+      const data = await r.json()
+      if (data.error) { alert('Mileage error: ' + data.error); return }
+      setDetail(prev => ({ ...prev, mileage_from_home: data.mileage_from_home }))
+    } catch {
+      alert('Could not calculate mileage')
+    } finally {
+      setCalcMileage(false)
+    }
+  }
+
+  // ── Detail state helpers ──────────────────────────────────────
   function setField(key, value) {
     setEdited(true)
     setDetail(prev => ({ ...prev, [key]: value }))
@@ -200,12 +259,8 @@ export default function FilingCabinet() {
     setDetail(prev => ({
       ...prev,
       services: [...(prev.services || []), {
-        id: null,
-        original_description: '',
-        standardized_description: '',
-        category: '',
-        amount: 0,
-        service_type: 'labor',
+        id: null, original_description: '', standardized_description: '',
+        category: '', amount: 0, service_type: 'labor', quantity: 1, unit_of_measure: 'each',
       }],
     }))
   }
@@ -223,8 +278,13 @@ export default function FilingCabinet() {
   const totalMaterials = (detail?.services || []).filter(s => s.service_type !== 'labor').reduce((s, i) => s + (parseFloat(i.amount) || 0), 0)
   const totalHours     = (detail?.time_entries || []).reduce((s, t) => s + (t.hours || 0), 0)
 
-  // ── Category options for dropdown ────────────────────────────
-  const catOptions = categories.map(c => c.name).sort()
+  const topLevelCats = categories.filter(c => !c.parent_id)
+  const subcatMap    = categories.reduce((m, c) => {
+    if (c.parent_id) { if (!m[c.parent_id]) m[c.parent_id] = []; m[c.parent_id].push(c) }
+    return m
+  }, {})
+
+  const isEstimate = detail?.status === 'estimate'
 
   // ─────────────────────────────────────────────────────────────
   return (
@@ -244,21 +304,21 @@ export default function FilingCabinet() {
           </div>
           <input
             type="text"
-            placeholder="Search customer or invoice..."
+            placeholder="Search customer or number..."
             value={search}
             onChange={e => setSearch(e.target.value)}
             className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 mb-2"
           />
           <div className="flex gap-1">
-            {['all', 'estimate', 'completed'].map(s => (
+            {TABS.map(tab => (
               <button
-                key={s}
-                onClick={() => setStatusFilter(s)}
+                key={tab.key}
+                onClick={() => setStatusFilter(tab.key)}
                 className={`flex-1 py-1 text-xs rounded-md font-medium transition-colors ${
-                  statusFilter === s ? 'bg-blue-100 text-blue-700' : 'text-gray-500 hover:bg-gray-100'
+                  statusFilter === tab.key ? 'bg-blue-100 text-blue-700' : 'text-gray-500 hover:bg-gray-100'
                 }`}
               >
-                {s === 'all' ? 'All' : s.charAt(0).toUpperCase() + s.slice(1)}
+                {tab.label}
               </button>
             ))}
           </div>
@@ -308,7 +368,6 @@ export default function FilingCabinet() {
       {/* ══ RIGHT DOSSIER PANEL ═══════════════════════════════════ */}
       <div className="flex-1 overflow-y-auto bg-gray-50">
 
-        {/* Empty state */}
         {!selectedId && (
           <div className="flex flex-col items-center justify-center h-full text-gray-400">
             <div className="text-5xl mb-4">🗂</div>
@@ -337,15 +396,6 @@ export default function FilingCabinet() {
                 </div>
               </div>
               <div className="flex gap-2 flex-shrink-0">
-                {detail.status === 'estimate' && (
-                  <button
-                    onClick={handleConvert}
-                    disabled={converting}
-                    className="bg-green-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-green-700 disabled:opacity-50 font-medium"
-                  >
-                    {converting ? 'Converting...' : 'Mark as Paid'}
-                  </button>
-                )}
                 <Link
                   to={`/print/${detail.job_id}`}
                   className="bg-white border border-gray-200 text-gray-700 px-4 py-2 rounded-lg text-sm hover:bg-gray-50 font-medium"
@@ -382,7 +432,7 @@ export default function FilingCabinet() {
                   <input
                     type="text"
                     value={detail.customer_phone || ''}
-                    onChange={e => setField('customer_phone', e.target.value)}
+                    onChange={e => setField('customer_phone', formatPhone(e.target.value))}
                     placeholder="(870) 555-1234"
                     className={INPUT}
                   />
@@ -408,14 +458,39 @@ export default function FilingCabinet() {
                   />
                 </div>
               </div>
+
+              {/* Mileage — internal only */}
+              <div className="mt-3 pt-3 border-t border-gray-100 flex items-center gap-4">
+                <div className="text-xs text-gray-400">
+                  <span className="font-medium text-gray-500">Drive from home:</span>{' '}
+                  {detail.mileage_from_home != null
+                    ? <span className="font-semibold text-gray-700">{detail.mileage_from_home} mi one-way</span>
+                    : <span className="italic">not calculated</span>
+                  }
+                  <span className="ml-1 text-gray-400">(internal only)</span>
+                </div>
+                {detail.customer_address && (
+                  <button
+                    onClick={handleCalcMileage}
+                    disabled={calcMileage}
+                    className="text-xs text-blue-600 hover:text-blue-800 border border-blue-200 rounded px-2 py-1 hover:bg-blue-50 disabled:opacity-50"
+                  >
+                    {calcMileage ? 'Calculating...' : detail.mileage_from_home ? 'Recalculate' : 'Calculate Mileage'}
+                  </button>
+                )}
+              </div>
             </div>
 
-            {/* ── INVOICE DETAILS ────────────────────────────────── */}
+            {/* ── JOB DETAILS ────────────────────────────────────── */}
             <div className="bg-white rounded-xl border border-gray-200 p-5">
-              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Invoice Details</h3>
+              <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">
+                {isEstimate ? 'Estimate Details' : 'Invoice Details'}
+              </h3>
               <div className="grid grid-cols-3 gap-3">
                 <div>
-                  <label className="block text-xs text-gray-400 mb-1">Invoice #</label>
+                  <label className="block text-xs text-gray-400 mb-1">
+                    {isEstimate ? 'Estimate #' : 'Invoice #'}
+                  </label>
                   <input
                     type="text"
                     value={detail.invoice_number || ''}
@@ -476,20 +551,19 @@ export default function FilingCabinet() {
                 <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
                   Services &amp; Line Items
                 </h3>
-                <button
-                  onClick={addService}
-                  className="text-xs text-blue-600 hover:text-blue-800 font-medium"
-                >
+                <button onClick={addService} className="text-xs text-blue-600 hover:text-blue-800 font-medium">
                   + Add Line
                 </button>
               </div>
 
               {/* Column headers */}
               <div className="grid gap-2 px-5 py-2 text-xs text-gray-400 font-medium bg-gray-50 border-b border-gray-100"
-                   style={{gridTemplateColumns: '3fr 2fr 90px 80px 28px'}}>
+                   style={{gridTemplateColumns: '3fr 1.5fr 55px 60px 75px 80px 28px'}}>
                 <div>Description</div>
                 <div>Category</div>
                 <div>Type</div>
+                <div className="text-center">Qty</div>
+                <div>Unit</div>
                 <div className="text-right">Amount</div>
                 <div></div>
               </div>
@@ -498,7 +572,7 @@ export default function FilingCabinet() {
                 {(detail.services || []).map((svc, idx) => (
                   <div key={idx}
                        className="grid gap-2 px-5 py-2 items-center"
-                       style={{gridTemplateColumns: '3fr 2fr 90px 80px 28px'}}>
+                       style={{gridTemplateColumns: '3fr 1.5fr 55px 60px 75px 80px 28px'}}>
                     <input
                       type="text"
                       value={svc.standardized_description || svc.original_description || ''}
@@ -515,7 +589,14 @@ export default function FilingCabinet() {
                       className={INPUT_SM}
                     >
                       <option value="">-- category --</option>
-                      {catOptions.map(c => <option key={c} value={c}>{c}</option>)}
+                      {topLevelCats.map(c => (
+                        <optgroup key={c.id} label={c.name}>
+                          <option value={c.name}>{c.name} (general)</option>
+                          {(subcatMap[c.id] || []).map(sub => (
+                            <option key={sub.id} value={sub.name}>{sub.name}</option>
+                          ))}
+                        </optgroup>
+                      ))}
                     </select>
                     <select
                       value={svc.service_type || 'labor'}
@@ -524,6 +605,21 @@ export default function FilingCabinet() {
                     >
                       <option value="labor">Labor</option>
                       <option value="materials">Materials</option>
+                    </select>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0"
+                      value={svc.quantity ?? 1}
+                      onChange={e => updateService(idx, 'quantity', parseFloat(e.target.value) || 1)}
+                      className={`${INPUT_SM} text-center`}
+                    />
+                    <select
+                      value={svc.unit_of_measure || 'each'}
+                      onChange={e => updateService(idx, 'unit_of_measure', e.target.value)}
+                      className={INPUT_SM}
+                    >
+                      {UOM_OPTIONS.map(u => <option key={u} value={u}>{u}</option>)}
                     </select>
                     <input
                       type="number"
@@ -578,11 +674,21 @@ export default function FilingCabinet() {
               </div>
             </div>
 
-            {/* ── DAYS ON SITE + TIME ENTRIES ────────────────────── */}
+            {/* ── PAYMENTS ───────────────────────────────────────── */}
+            {!isEstimate && (
+              <PaymentsSection
+                detail={detail}
+                paymentForm={paymentForm}
+                setPaymentForm={setPaymentForm}
+                onAdd={handleAddPayment}
+                onDelete={handleDeletePayment}
+                adding={addingPayment}
+              />
+            )}
+
+            {/* ── TIME ENTRIES ────────────────────────────────────── */}
             {(detail.time_entries?.length > 0 || detail.unlinked_time_entries?.length > 0) && (
               <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-
-                {/* Header with days comparison */}
                 <div className="px-5 py-3 border-b border-gray-100">
                   <div className="flex items-center justify-between">
                     <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
@@ -592,24 +698,13 @@ export default function FilingCabinet() {
                       {totalHours > 0 && (
                         <span className="text-gray-500">{fmtHours(totalHours)} total</span>
                       )}
-                      {detail.actual_days > 0 && totalHours > 0 && (
-                        <span className="text-gray-400 text-xs">
-                          {(totalHours / detail.actual_days).toFixed(1)}h/day avg
-                        </span>
-                      )}
                     </div>
                   </div>
-
-                  {/* Estimated vs Actual pill */}
                   {(detail.actual_days > 0 || detail.estimated_days) && (
-                    <DaysComparison
-                      estimated={detail.estimated_days}
-                      actual={detail.actual_days}
-                    />
+                    <DaysComparison estimated={detail.estimated_days} actual={detail.actual_days} />
                   )}
                 </div>
 
-                {/* Day-by-day breakdown */}
                 {detail.days_on_site?.length > 0 && (
                   <div className="px-5 py-3 border-b border-gray-100 bg-gray-50">
                     <div className="flex flex-wrap gap-2">
@@ -626,13 +721,11 @@ export default function FilingCabinet() {
                   </div>
                 )}
 
-                {/* Linked entries */}
                 {detail.time_entries?.length > 0 && (
                   <div className="divide-y divide-gray-50">
                     {detail.time_entries.map(t => (
                       <TimeEntryRow
-                        key={t.id}
-                        entry={t}
+                        key={t.id} entry={t}
                         customerJobs={detail.customer_jobs}
                         currentJobId={detail.job_id}
                         onReassign={handleReassign}
@@ -641,23 +734,17 @@ export default function FilingCabinet() {
                   </div>
                 )}
 
-                {/* Unlinked entries for this customer */}
                 {detail.unlinked_time_entries?.length > 0 && (
                   <>
                     <div className="px-5 py-2 bg-amber-50 border-t border-amber-100">
                       <span className="text-xs font-medium text-amber-700">
                         {detail.unlinked_time_entries.length} unlinked {detail.unlinked_time_entries.length === 1 ? 'entry' : 'entries'} for this customer
-                        {(detail.customer_jobs?.length ?? 0) > 1
-                          ? ' — use the dropdown to assign'
-                          : ' — click Claim to attach'}
                       </span>
                     </div>
                     <div className="divide-y divide-gray-50">
                       {detail.unlinked_time_entries.map(t => (
                         <TimeEntryRow
-                          key={t.id}
-                          entry={t}
-                          unlinked
+                          key={t.id} entry={t} unlinked
                           onClaim={() => handleClaim(t.id)}
                           customerJobs={detail.customer_jobs}
                           currentJobId={detail.job_id}
@@ -678,16 +765,152 @@ export default function FilingCabinet() {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Days Comparison: Estimated vs Actual
+// ─────────────────────────────────────────────────────────────────
+// Payments Section
+// ─────────────────────────────────────────────────────────────────
+const PAYMENT_METHODS = ['Cash', 'Check', 'Venmo', 'Zelle', 'PayPal', 'Credit Card', 'Debit Card', 'Bank Transfer', 'Other']
+
+function PaymentsSection({ detail, paymentForm, setPaymentForm, onAdd, onDelete, adding }) {
+  const totalAmount  = detail.total_amount || 0
+  const totalPaid    = (detail.payments || []).reduce((s, p) => s + (p.amount || 0), 0)
+  const balanceDue   = Math.max(totalAmount - totalPaid, 0)
+  const paidInFull   = totalAmount > 0 && balanceDue === 0
+  const pctPaid      = totalAmount > 0 ? Math.min((totalPaid / totalAmount) * 100, 100) : 0
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+      {/* Header */}
+      <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
+        <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Payments</h3>
+        {paidInFull ? (
+          <span className="text-xs font-bold text-green-700 bg-green-100 px-3 py-1 rounded-full">
+            PAID IN FULL
+          </span>
+        ) : (
+          <span className="text-sm font-semibold text-red-600">
+            Balance Due: {fmt(balanceDue)}
+          </span>
+        )}
+      </div>
+
+      {/* Progress bar */}
+      {totalAmount > 0 && (
+        <div className="px-5 pt-3 pb-1">
+          <div className="flex justify-between text-xs text-gray-500 mb-1">
+            <span>{fmt(totalPaid)} paid</span>
+            <span>{fmt(totalAmount)} total</span>
+          </div>
+          <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden">
+            <div
+              className={`h-2 rounded-full transition-all ${paidInFull ? 'bg-green-500' : 'bg-blue-500'}`}
+              style={{ width: `${pctPaid}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Existing payments */}
+      {(detail.payments || []).length > 0 && (
+        <div className="divide-y divide-gray-50 mt-2">
+          {detail.payments.map(p => (
+            <div key={p.id} className="px-5 py-2.5 flex items-center justify-between gap-3">
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-semibold text-green-700">{fmt(p.amount)}</span>
+                  <span className="text-xs text-gray-400">·</span>
+                  <span className="text-xs text-gray-500 capitalize">{p.payment_method}</span>
+                  <span className="text-xs text-gray-400">·</span>
+                  <span className="text-xs text-gray-500">{p.payment_date}</span>
+                </div>
+                {p.memo && <div className="text-xs text-gray-400 mt-0.5 truncate">{p.memo}</div>}
+              </div>
+              <button
+                onClick={() => onDelete(p.id)}
+                className="text-gray-300 hover:text-red-500 text-lg leading-none"
+                title="Remove payment"
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {(!detail.payments || detail.payments.length === 0) && (
+        <div className="px-5 py-3 text-xs text-gray-400 italic">No payments recorded yet.</div>
+      )}
+
+      {/* Add payment form */}
+      {!paidInFull && (
+        <div className="px-5 py-4 bg-gray-50 border-t border-gray-100">
+          <p className="text-xs font-semibold text-gray-500 mb-3">Record a Payment</p>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">Amount *</label>
+              <div className="relative">
+                <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400 text-sm">$</span>
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  value={paymentForm.amount}
+                  onChange={e => setPaymentForm(f => ({ ...f, amount: e.target.value }))}
+                  placeholder={balanceDue > 0 ? balanceDue.toFixed(2) : '0.00'}
+                  className="w-full border border-gray-200 rounded-lg pl-7 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                  onFocus={e => { if (!paymentForm.amount && balanceDue > 0) setPaymentForm(f => ({ ...f, amount: balanceDue.toFixed(2) })) }}
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">Method</label>
+              <select
+                value={paymentForm.payment_method}
+                onChange={e => setPaymentForm(f => ({ ...f, payment_method: e.target.value }))}
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              >
+                {PAYMENT_METHODS.map(m => (
+                  <option key={m} value={m.toLowerCase().replace(/ /g, '_')}>{m}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">Date Received</label>
+              <input
+                type="date"
+                value={paymentForm.payment_date}
+                onChange={e => setPaymentForm(f => ({ ...f, payment_date: e.target.value }))}
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">Memo (optional)</label>
+              <input
+                type="text"
+                value={paymentForm.memo}
+                onChange={e => setPaymentForm(f => ({ ...f, memo: e.target.value }))}
+                placeholder="Check #, note..."
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+              />
+            </div>
+          </div>
+          <button
+            onClick={onAdd}
+            disabled={adding || !paymentForm.amount}
+            className="mt-3 bg-green-600 text-white px-5 py-2 rounded-lg text-sm hover:bg-green-700 disabled:opacity-50 font-medium"
+          >
+            {adding ? 'Recording...' : 'Record Payment'}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─────────────────────────────────────────────────────────────────
 function DaysComparison({ estimated, actual }) {
   if (!estimated && !actual) return null
-
-  const diff = actual && estimated ? actual - estimated : null
+  const diff   = actual && estimated ? actual - estimated : null
   const onTime = diff !== null && diff <= 0
-  const over = diff !== null && diff > 0
-  const noEstimate = !estimated && actual > 0
-
   return (
     <div className="flex items-center gap-3 mt-2 flex-wrap">
       {estimated && (
@@ -703,21 +926,14 @@ function DaysComparison({ estimated, actual }) {
         </div>
       )}
       {diff !== null && (
-        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
-          onTime ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
-        }`}>
+        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${onTime ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
           {onTime ? (diff === 0 ? 'On estimate' : `${Math.abs(diff)} day${Math.abs(diff) !== 1 ? 's' : ''} under`) : `${diff} day${diff !== 1 ? 's' : ''} over`}
         </span>
-      )}
-      {noEstimate && (
-        <span className="text-xs text-gray-400 italic">No estimate was set</span>
       )}
     </div>
   )
 }
 
-// ─────────────────────────────────────────────────────────────────
-// Time Entry Row
 // ─────────────────────────────────────────────────────────────────
 function TimeEntryRow({ entry, unlinked, onClaim, customerJobs, currentJobId, onReassign }) {
   const startTime = fmtTime(entry.start_time)
@@ -728,20 +944,14 @@ function TimeEntryRow({ entry, unlinked, onClaim, customerJobs, currentJobId, on
   return (
     <div className={`px-5 py-3 flex items-center justify-between gap-4 ${unlinked ? 'bg-amber-50/40' : ''}`}>
       <div className="flex-1 min-w-0">
-        <div className="text-sm text-gray-800 truncate">
-          {entry.description || 'No description'}
-        </div>
+        <div className="text-sm text-gray-800 truncate">{entry.description || 'No description'}</div>
         <div className="text-xs text-gray-400 mt-0.5 flex items-center gap-2 flex-wrap">
           <span>{entry.entry_date}</span>
           {timeRange && <span>{timeRange}</span>}
           {entry.cost_code && (
-            <span className="bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded text-xs">
-              {entry.cost_code}
-            </span>
+            <span className="bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded text-xs">{entry.cost_code}</span>
           )}
-          <span className={`px-1.5 py-0.5 rounded text-xs ${
-            entry.source === 'busybusy' ? 'bg-purple-100 text-purple-600' : 'bg-gray-100 text-gray-500'
-          }`}>
+          <span className={`px-1.5 py-0.5 rounded text-xs ${entry.source === 'busybusy' ? 'bg-purple-100 text-purple-600' : 'bg-gray-100 text-gray-500'}`}>
             {entry.source || 'manual'}
           </span>
         </div>
@@ -750,25 +960,18 @@ function TimeEntryRow({ entry, unlinked, onClaim, customerJobs, currentJobId, on
         <div className="text-sm font-semibold text-gray-700 tabular-nums">
           {(entry.hours || 0).toFixed(2)}h
         </div>
-
-        {/* Invoice reassignment dropdown — appears when customer has multiple jobs */}
         {multiJob && onReassign && (
           <select
             value={unlinked ? '' : String(currentJobId)}
             onChange={e => e.target.value !== '' && onReassign(entry.id, parseInt(e.target.value))}
             className="text-xs border border-gray-200 rounded px-1.5 py-1 text-gray-500 bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 max-w-36"
-            title="Move to a different invoice"
           >
             {unlinked && <option value="">— assign to —</option>}
             {customerJobs.map(j => (
-              <option key={j.job_id} value={String(j.job_id)}>
-                {j.invoice_number}
-              </option>
+              <option key={j.job_id} value={String(j.job_id)}>{j.invoice_number}</option>
             ))}
           </select>
         )}
-
-        {/* Claim button — only for unlinked entries when customer has just one job */}
         {unlinked && !multiJob && onClaim && (
           <button
             onClick={onClaim}

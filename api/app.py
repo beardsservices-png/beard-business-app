@@ -7,7 +7,14 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 import sqlite3
 import os
+import re
+import urllib.request
+import urllib.parse
+import json
 from datetime import datetime
+
+BRIAN_HOME_LAT = 36.3345   # Mountain Home, AR
+BRIAN_HOME_LON = -92.3857
 
 app = Flask(__name__)
 CORS(app)
@@ -184,7 +191,7 @@ def list_customers():
     cursor = conn.cursor()
 
     cursor.execute('''
-        SELECT c.id, c.name, c.phone, c.email, c.address, c.notes,
+        SELECT c.id, c.name, c.phone, c.email, c.address, c.notes, c.mileage_from_home,
                COALESCE(j_count.cnt, 0) as job_count,
                COALESCE(inv.labor, 0) as total_labor,
                COALESCE(te.hours, 0) as total_hours
@@ -246,6 +253,58 @@ def update_customer(customer_id):
     conn.commit()
     conn.close()
     return jsonify({'id': customer_id, 'message': 'Customer updated'})
+
+
+@app.route('/api/customers/<int:customer_id>/calculate-mileage', methods=['POST'])
+def calculate_customer_mileage(customer_id):
+    """Geocode the customer address and calculate driving distance from Brian's home."""
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('SELECT address FROM customers WHERE id = ?', (customer_id,))
+    row = cursor.fetchone()
+    if not row or not row['address']:
+        conn.close()
+        return jsonify({'error': 'No address on file'}), 400
+
+    address = row['address']
+    try:
+        # Geocode with Nominatim (OpenStreetMap)
+        encoded = urllib.parse.quote(address + ', USA')
+        url = f'https://nominatim.openstreetmap.org/search?q={encoded}&format=json&limit=1'
+        req = urllib.request.Request(url, headers={'User-Agent': 'BeardHomeServices/1.0'})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            geo = json.loads(resp.read())
+        if not geo:
+            conn.close()
+            return jsonify({'error': 'Could not geocode address'}), 422
+        dest_lat = float(geo[0]['lat'])
+        dest_lon = float(geo[0]['lon'])
+
+        # Route with OSRM public API
+        osrm_url = (
+            f'https://router.project-osrm.org/route/v1/driving/'
+            f'{BRIAN_HOME_LON},{BRIAN_HOME_LAT};{dest_lon},{dest_lat}'
+            f'?overview=false'
+        )
+        req2 = urllib.request.Request(osrm_url, headers={'User-Agent': 'BeardHomeServices/1.0'})
+        with urllib.request.urlopen(req2, timeout=10) as resp2:
+            route = json.loads(resp2.read())
+
+        if route.get('code') != 'Ok' or not route.get('routes'):
+            conn.close()
+            return jsonify({'error': 'Could not calculate route'}), 422
+
+        meters = route['routes'][0]['distance']
+        miles = round(meters / 1609.344, 1)
+
+        cursor.execute('UPDATE customers SET mileage_from_home = ? WHERE id = ?', (miles, customer_id))
+        conn.commit()
+        conn.close()
+        return jsonify({'customer_id': customer_id, 'mileage_from_home': miles})
+
+    except Exception as e:
+        conn.close()
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/customers/<int:customer_id>')
@@ -454,7 +513,8 @@ def filing_cabinet_list():
                COALESCE(i.total_amount, i.total_labor + i.total_materials, 0) as total_amount,
                COALESCE((SELECT SUM(hours) FROM time_entries WHERE job_id = j.id), 0) as total_hours,
                COALESCE((SELECT COUNT(DISTINCT entry_date) FROM time_entries WHERE job_id = j.id), 0) as actual_days,
-               (SELECT COUNT(*) FROM time_entries WHERE job_id = j.id) as time_entry_count
+               (SELECT COUNT(*) FROM time_entries WHERE job_id = j.id) as time_entry_count,
+               COALESCE((SELECT SUM(amount) FROM payments WHERE job_id = j.id), 0) as total_paid
         FROM jobs j
         JOIN customers c ON j.customer_id = c.id
         LEFT JOIN invoices i ON j.id = i.job_id
@@ -494,7 +554,8 @@ def filing_cabinet_get(job_id):
         return jsonify({'error': 'Job not found'}), 404
 
     cursor.execute('''
-        SELECT id, original_description, standardized_description, category, amount, service_type
+        SELECT id, original_description, standardized_description, category, amount, service_type,
+               COALESCE(quantity, 1) as quantity, COALESCE(unit_of_measure, 'each') as unit_of_measure
         FROM services_performed WHERE job_id = ?
         ORDER BY id
     ''', (job_id,))
@@ -546,6 +607,16 @@ def filing_cabinet_get(job_id):
     ''', (job['customer_id'],))
     job['customer_jobs'] = rows_to_list(cursor.fetchall())
 
+    # Payments
+    cursor.execute('''
+        SELECT id, amount, payment_date, payment_method, memo, created_at
+        FROM payments WHERE job_id = ?
+        ORDER BY payment_date, id
+    ''', (job_id,))
+    job['payments'] = rows_to_list(cursor.fetchall())
+    job['total_paid'] = sum(p['amount'] for p in job['payments'])
+    job['balance_due'] = round(job['total_amount'] - job['total_paid'], 2)
+
     conn.close()
     return jsonify(job)
 
@@ -563,19 +634,25 @@ def filing_cabinet_new():
     try:
         start_date = data.get('start_date') or datetime.today().strftime('%Y-%m-%d')
 
-        # Auto-generate invoice number from date if not provided
+        # Auto-generate number from date if not provided
+        # Estimates use EST prefix; invoices use BHS prefix
+        status = data.get('status', 'completed')
         raw_num = data.get('invoice_number') or ''
         if raw_num:
-            invoice_num = raw_num if (raw_num.startswith('BHS') or raw_num.startswith('EST')) else 'BHS' + raw_num
+            if raw_num.startswith('BHS') or raw_num.startswith('EST'):
+                invoice_num = raw_num
+            elif status == 'estimate':
+                invoice_num = 'EST' + raw_num
+            else:
+                invoice_num = 'BHS' + raw_num
         else:
             date_compact = start_date.replace('-', '')
-            invoice_num = f"BHS{date_compact}"
+            prefix = 'EST' if status == 'estimate' else 'BHS'
+            invoice_num = f"{prefix}{date_compact}"
 
         numeric = invoice_num.lstrip('ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz')
         if len(numeric) == 8:
             start_date = f"{numeric[:4]}-{numeric[4:6]}-{numeric[6:8]}"
-
-        status = data.get('status', 'completed')
 
         cursor.execute('''
             INSERT INTO jobs (customer_id, invoice_id, project_number, start_date, status, notes, estimated_days)
@@ -599,14 +676,15 @@ def filing_cabinet_new():
         invoice_id = cursor.lastrowid
 
         for svc in services:
+            desc = svc.get('original_description') or svc.get('description', '')
             cursor.execute('''
                 INSERT INTO services_performed
                 (invoice_id, job_id, original_description, standardized_description,
-                 category, amount, service_type)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (invoice_id, job_id, svc.get('description', ''),
-                  svc.get('description', ''), svc.get('category'),
-                  svc.get('amount', 0), svc.get('service_type', 'labor')))
+                 category, amount, service_type, quantity, unit_of_measure)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (invoice_id, job_id, desc, desc, svc.get('category'),
+                  svc.get('amount', 0), svc.get('service_type', 'labor'),
+                  svc.get('quantity', 1), svc.get('unit_of_measure', 'each')))
 
         for te in data.get('time_entries', []):
             if te.get('hours'):
@@ -693,10 +771,11 @@ def filing_cabinet_update(job_id):
                 cursor.execute('''
                     INSERT INTO services_performed
                     (invoice_id, job_id, original_description, standardized_description,
-                     category, amount, service_type)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                     category, amount, service_type, quantity, unit_of_measure)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (invoice_id, job_id, orig_desc, std_desc,
-                      svc.get('category'), svc.get('amount', 0), svc.get('service_type', 'labor')))
+                      svc.get('category'), svc.get('amount', 0), svc.get('service_type', 'labor'),
+                      svc.get('quantity', 1), svc.get('unit_of_measure', 'each')))
 
         # Handle time entries - update existing, add new
         cursor.execute('SELECT id FROM time_entries WHERE job_id = ?', (job_id,))
@@ -748,6 +827,102 @@ def filing_cabinet_update(job_id):
     except Exception as e:
         conn.close()
         return jsonify({'error': str(e)}), 500
+
+
+# ============================================================
+# PAYMENTS
+# ============================================================
+
+@app.route('/api/jobs/<int:job_id>/payments', methods=['POST'])
+def add_payment(job_id):
+    """Record a payment against a job."""
+    data = request.json
+    if not data or not data.get('amount'):
+        return jsonify({'error': 'amount is required'}), 400
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    # Verify job exists and get customer_id + total
+    cursor.execute('''
+        SELECT j.customer_id,
+               COALESCE(i.total_amount, i.total_labor + i.total_materials, 0) as total_amount
+        FROM jobs j
+        LEFT JOIN invoices i ON j.id = i.job_id
+        WHERE j.id = ?
+    ''', (job_id,))
+    job_row = cursor.fetchone()
+    if not job_row:
+        conn.close()
+        return jsonify({'error': 'Job not found'}), 404
+
+    payment_date = data.get('payment_date') or datetime.today().strftime('%Y-%m-%d')
+    cursor.execute('''
+        INSERT INTO payments (job_id, customer_id, amount, payment_date, payment_method, memo)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (job_id, job_row['customer_id'], float(data['amount']),
+          payment_date, data.get('payment_method', 'cash'), data.get('memo', '')))
+    payment_id = cursor.lastrowid
+
+    # Check if fully paid and auto-update status
+    cursor.execute('SELECT COALESCE(SUM(amount), 0) as total_paid FROM payments WHERE job_id = ?', (job_id,))
+    total_paid = cursor.fetchone()['total_paid']
+    total_amount = job_row['total_amount']
+    if total_amount > 0 and total_paid >= total_amount:
+        cursor.execute("UPDATE jobs SET status = 'paid' WHERE id = ?", (job_id,))
+        cursor.execute("UPDATE invoices SET status = 'paid' WHERE job_id = ?", (job_id,))
+        new_status = 'paid'
+    else:
+        cursor.execute("UPDATE jobs SET status = 'pending' WHERE id = ? AND status = 'estimate'", (job_id,))
+        cursor.execute('SELECT status FROM jobs WHERE id = ?', (job_id,))
+        new_status = cursor.fetchone()['status']
+
+    conn.commit()
+    conn.close()
+    return jsonify({
+        'id': payment_id,
+        'total_paid': round(total_paid, 2),
+        'balance_due': round(max(total_amount - total_paid, 0), 2),
+        'status': new_status,
+    }), 201
+
+
+@app.route('/api/payments/<int:payment_id>', methods=['DELETE'])
+def delete_payment(payment_id):
+    """Remove a payment and re-evaluate job status."""
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute('SELECT job_id FROM payments WHERE id = ?', (payment_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'error': 'Payment not found'}), 404
+    job_id = row['job_id']
+
+    cursor.execute('DELETE FROM payments WHERE id = ?', (payment_id,))
+
+    # Re-check balance
+    cursor.execute('SELECT COALESCE(SUM(amount), 0) as total_paid FROM payments WHERE job_id = ?', (job_id,))
+    total_paid = cursor.fetchone()['total_paid']
+    cursor.execute('''
+        SELECT COALESCE(i.total_amount, i.total_labor + i.total_materials, 0) as total_amount
+        FROM jobs j LEFT JOIN invoices i ON j.id = i.job_id WHERE j.id = ?
+    ''', (job_id,))
+    total_amount = cursor.fetchone()['total_amount']
+
+    if total_amount > 0 and total_paid >= total_amount:
+        new_status = 'paid'
+    elif total_paid > 0:
+        new_status = 'pending'
+    else:
+        new_status = 'pending'
+
+    cursor.execute("UPDATE jobs SET status = ? WHERE id = ?", (new_status, job_id))
+    cursor.execute("UPDATE invoices SET status = ? WHERE job_id = ?", (new_status, job_id))
+    conn.commit()
+    conn.close()
+    return jsonify({'message': 'Deleted', 'balance_due': round(max(total_amount - total_paid, 0), 2)})
 
 
 # ============================================================
@@ -846,6 +1021,180 @@ def reassign_time_entry(te_id):
 
 
 # ============================================================
+# EXPENSES
+# ============================================================
+
+EXPENSE_CATEGORIES = [
+    'Materials & Supplies',
+    'Fuel & Transportation',
+    'Tools & Equipment',
+    'Equipment Repair & Maintenance',
+    'Subcontractors',
+    'Insurance',
+    'Licensing & Permits',
+    'Marketing & Advertising',
+    'Office & Administrative',
+    'Phone & Communications',
+    'Clothing & Safety Gear',
+    'Professional Development',
+    'Disposal & Dump Fees',
+    'Other',
+]
+
+
+@app.route('/api/expenses')
+def list_expenses():
+    conn = get_db()
+    cursor = conn.cursor()
+
+    job_id     = request.args.get('job_id')
+    overhead   = request.args.get('overhead')  # '1' or '0'
+    category   = request.args.get('category')
+    start_date = request.args.get('start_date')
+    end_date   = request.args.get('end_date')
+
+    query = '''
+        SELECT e.id, e.description, e.cost, e.vendor, e.expense_date,
+               e.expense_category, e.is_overhead, e.payment_method, e.notes,
+               e.job_id, e.customer_id, e.receipt_path,
+               c.name as customer_name,
+               COALESCE(i.invoice_number, j.invoice_id) as invoice_number
+        FROM materials_expenses e
+        LEFT JOIN customers c ON e.customer_id = c.id
+        LEFT JOIN jobs j ON e.job_id = j.id
+        LEFT JOIN invoices i ON j.id = i.job_id
+        WHERE 1=1
+    '''
+    params = []
+
+    if job_id:
+        query += ' AND e.job_id = ?'
+        params.append(job_id)
+    if overhead is not None:
+        query += ' AND e.is_overhead = ?'
+        params.append(int(overhead))
+    if category:
+        query += ' AND e.expense_category = ?'
+        params.append(category)
+    if start_date:
+        query += ' AND e.expense_date >= ?'
+        params.append(start_date)
+    if end_date:
+        query += ' AND e.expense_date <= ?'
+        params.append(end_date)
+
+    query += ' ORDER BY e.expense_date DESC, e.id DESC LIMIT 500'
+    cursor.execute(query, params)
+    expenses = rows_to_list(cursor.fetchall())
+    conn.close()
+    return jsonify(expenses)
+
+
+@app.route('/api/expenses', methods=['POST'])
+def create_expense():
+    data = request.json
+    if not data or not data.get('cost') or not data.get('description'):
+        return jsonify({'error': 'description and cost are required'}), 400
+
+    conn = get_db()
+    cursor = conn.cursor()
+    expense_date = data.get('expense_date') or datetime.today().strftime('%Y-%m-%d')
+    is_overhead  = 1 if (data.get('is_overhead') or not data.get('job_id')) else 0
+    customer_id  = data.get('customer_id')
+
+    # If job_id given and no customer_id, derive it
+    if data.get('job_id') and not customer_id:
+        row = cursor.execute('SELECT customer_id FROM jobs WHERE id = ?', (data['job_id'],)).fetchone()
+        if row:
+            customer_id = row['customer_id']
+
+    cursor.execute('''
+        INSERT INTO materials_expenses
+        (job_id, customer_id, description, cost, vendor, expense_date,
+         expense_category, is_overhead, payment_method, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (data.get('job_id'), customer_id, data['description'],
+          float(data['cost']), data.get('vendor', ''), expense_date,
+          data.get('expense_category', 'Materials & Supplies'),
+          is_overhead, data.get('payment_method', ''), data.get('notes', '')))
+    exp_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    return jsonify({'id': exp_id, 'message': 'Expense recorded'}), 201
+
+
+@app.route('/api/expenses/<int:exp_id>', methods=['PUT'])
+def update_expense(exp_id):
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data'}), 400
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('''
+        UPDATE materials_expenses SET
+            description = ?, cost = ?, vendor = ?, expense_date = ?,
+            expense_category = ?, is_overhead = ?, payment_method = ?,
+            notes = ?, job_id = ?
+        WHERE id = ?
+    ''', (data.get('description'), float(data.get('cost', 0)), data.get('vendor', ''),
+          data.get('expense_date'), data.get('expense_category'),
+          1 if data.get('is_overhead') else 0, data.get('payment_method', ''),
+          data.get('notes', ''), data.get('job_id'), exp_id))
+    conn.commit()
+    conn.close()
+    return jsonify({'id': exp_id, 'message': 'Updated'})
+
+
+@app.route('/api/expenses/<int:exp_id>', methods=['DELETE'])
+def delete_expense(exp_id):
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM materials_expenses WHERE id = ?', (exp_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'message': 'Deleted'})
+
+
+@app.route('/api/expenses/categories')
+def expense_categories():
+    return jsonify(EXPENSE_CATEGORIES)
+
+
+@app.route('/api/expenses/summary')
+def expense_summary():
+    """Totals by category and overhead vs job-specific for a date range."""
+    conn = get_db()
+    cursor = conn.cursor()
+    start_date = request.args.get('start_date', '2000-01-01')
+    end_date   = request.args.get('end_date', '2099-12-31')
+
+    cursor.execute('''
+        SELECT expense_category,
+               SUM(CASE WHEN is_overhead = 1 THEN cost ELSE 0 END) as overhead_total,
+               SUM(CASE WHEN is_overhead = 0 THEN cost ELSE 0 END) as job_total,
+               SUM(cost) as grand_total,
+               COUNT(*) as count
+        FROM materials_expenses
+        WHERE expense_date BETWEEN ? AND ?
+        GROUP BY expense_category
+        ORDER BY grand_total DESC
+    ''', (start_date, end_date))
+    by_category = rows_to_list(cursor.fetchall())
+
+    cursor.execute('''
+        SELECT
+            SUM(CASE WHEN is_overhead = 1 THEN cost ELSE 0 END) as total_overhead,
+            SUM(CASE WHEN is_overhead = 0 THEN cost ELSE 0 END) as total_job_costs,
+            SUM(cost) as total_expenses
+        FROM materials_expenses
+        WHERE expense_date BETWEEN ? AND ?
+    ''', (start_date, end_date))
+    totals = row_to_dict(cursor.fetchone())
+    conn.close()
+    return jsonify({'by_category': by_category, 'totals': totals})
+
+
+# ============================================================
 # INVOICES
 # ============================================================
 
@@ -877,21 +1226,130 @@ def list_categories():
     cursor = conn.cursor()
     cursor.execute('''
         SELECT sc.id, sc.name, sc.description, sc.is_labor,
+               sc.parent_id,
                COUNT(sp.id) as usage_count,
-               SUM(sp.amount) as total_revenue
+               COALESCE(SUM(sp.amount), 0) as total_revenue
         FROM service_categories sc
         LEFT JOIN services_performed sp ON sc.name = sp.category
         GROUP BY sc.id
-        ORDER BY total_revenue DESC
+        ORDER BY sc.parent_id NULLS FIRST, sc.name
     ''')
     categories = rows_to_list(cursor.fetchall())
     conn.close()
     return jsonify(categories)
 
 
+@app.route('/api/categories', methods=['POST'])
+def create_category():
+    data = request.json
+    if not data or not data.get('name'):
+        return jsonify({'error': 'Category name is required'}), 400
+
+    conn = get_db()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            'INSERT INTO service_categories (name, description, is_labor, parent_id) VALUES (?, ?, ?, ?)',
+            (data['name'].strip(), data.get('description', ''),
+             1 if data.get('is_labor', True) else 0,
+             data.get('parent_id'))
+        )
+        cat_id = cursor.lastrowid
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        return jsonify({'error': 'Category already exists'}), 409
+    conn.close()
+    return jsonify({'id': cat_id, 'name': data['name']}), 201
+
+
+@app.route('/api/categories/<int:cat_id>', methods=['PUT'])
+def update_category(cat_id):
+    data = request.json
+    if not data:
+        return jsonify({'error': 'No data'}), 400
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute(
+        'UPDATE service_categories SET name=?, description=?, is_labor=?, parent_id=? WHERE id=?',
+        (data.get('name'), data.get('description'), 1 if data.get('is_labor', True) else 0,
+         data.get('parent_id'), cat_id)
+    )
+    conn.commit()
+    conn.close()
+    return jsonify({'id': cat_id, 'message': 'Updated'})
+
+
+@app.route('/api/categories/<int:cat_id>', methods=['DELETE'])
+def delete_category(cat_id):
+    conn = get_db()
+    cursor = conn.cursor()
+    # Prevent deleting categories that have children or are in use
+    cursor.execute('SELECT COUNT(*) as cnt FROM service_categories WHERE parent_id = ?', (cat_id,))
+    if cursor.fetchone()['cnt'] > 0:
+        conn.close()
+        return jsonify({'error': 'Category has subcategories — delete those first'}), 409
+    cursor.execute('DELETE FROM service_categories WHERE id = ?', (cat_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'message': 'Deleted'})
+
+
 # ============================================================
 # PRICING SUGGESTIONS (for Estimate form)
 # ============================================================
+
+@app.route('/api/pricing/claude-suggest', methods=['POST'])
+def pricing_claude_suggest():
+    """Use Claude API to suggest pricing for a service description."""
+    api_key = os.environ.get('ANTHROPIC_API_KEY')
+    if not api_key:
+        return jsonify({'error': 'ANTHROPIC_API_KEY not set', 'available': False}), 200
+
+    data = request.json or {}
+    description = data.get('description', '')
+    category = data.get('category', '')
+    historical = data.get('historical', {})
+
+    prompt = f"""You are a pricing advisor for a one-person handyman business in Mountain Home, AR (rural Ozarks).
+
+Service to price: {description}
+Category: {category}
+My historical data for this category: {json.dumps(historical) if historical else 'No history yet'}
+
+Provide a concise JSON response with these fields:
+- suggested_low: lower end of a fair price range (integer dollars)
+- suggested_high: upper end of a fair price range (integer dollars)
+- suggested_price: your single best recommendation (integer dollars)
+- rationale: 1-2 sentence plain-English explanation of the pricing
+- factors: array of 2-4 short strings noting key factors (difficulty, materials, time, etc.)
+
+Base pricing on: rural Arkansas labor rates (~$45-85/hr skilled trades), realistic job complexity, material costs typical for Mountain Home area, and the goal of staying competitive while being profitable. Respond with ONLY valid JSON, no other text."""
+
+    try:
+        req_data = json.dumps({
+            'model': 'claude-haiku-4-5-20251001',
+            'max_tokens': 400,
+            'messages': [{'role': 'user', 'content': prompt}]
+        }).encode()
+        req = urllib.request.Request(
+            'https://api.anthropic.com/v1/messages',
+            data=req_data,
+            headers={
+                'x-api-key': api_key,
+                'anthropic-version': '2023-06-01',
+                'content-type': 'application/json',
+            }
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            result = json.loads(resp.read())
+        text = result['content'][0]['text'].strip()
+        suggestion = json.loads(text)
+        suggestion['available'] = True
+        return jsonify(suggestion)
+    except Exception as e:
+        return jsonify({'error': str(e), 'available': False}), 200
+
 
 @app.route('/api/pricing/suggest')
 def pricing_suggest():

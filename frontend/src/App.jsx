@@ -6,6 +6,7 @@ import TimeEntry from './pages/TimeEntry'
 import FilingCabinet from './pages/FilingCabinet'
 import PrintView from './pages/PrintView'
 import Estimate from './pages/Estimate'
+import Expenses from './pages/Expenses'
 
 function App() {
   return (
@@ -42,6 +43,10 @@ function App() {
                   `px-4 py-2 rounded-lg font-medium transition-colors ${isActive ? 'bg-blue-100 text-blue-700' : 'text-slate-600 hover:bg-slate-100'}`}>
                   + Estimate
                 </NavLink>
+                <NavLink to="/expenses" className={({ isActive }) =>
+                  `px-4 py-2 rounded-lg font-medium transition-colors ${isActive ? 'bg-orange-100 text-orange-700' : 'text-slate-600 hover:bg-slate-100'}`}>
+                  Expenses
+                </NavLink>
               </div>
             </div>
           </div>
@@ -55,6 +60,7 @@ function App() {
             <Route path="/time" element={<TimeEntry />} />
             <Route path="/estimate" element={<Estimate />} />
             <Route path="/print/:jobId" element={<PrintView />} />
+            <Route path="/expenses" element={<Expenses />} />
           </Routes>
         </main>
       </div>

@@ -1,6 +1,13 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 
+function formatPhone(raw) {
+  const digits = (raw || '').replace(/\D/g, '').slice(0, 10)
+  if (digits.length < 4) return digits
+  if (digits.length < 7) return `(${digits.slice(0, 3)}) ${digits.slice(3)}`
+  return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`
+}
+
 export default function Customers() {
   const [customers, setCustomers] = useState([])
   const [selected, setSelected] = useState(null)
@@ -10,11 +17,12 @@ export default function Customers() {
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState({ name: '', address: '', phone: '', email: '', notes: '' })
   const [saving, setSaving] = useState(false)
+  const [calcMileage, setCalcMileage] = useState(false)
 
   useEffect(() => {
     fetch('/api/customers')
       .then(r => r.json())
-      .then(data => { setCustomers(data.customers || []); setLoading(false) })
+      .then(data => { setCustomers(Array.isArray(data) ? data : (data.customers || [])); setLoading(false) })
       .catch(() => setLoading(false))
   }, [])
 
@@ -42,15 +50,33 @@ export default function Customers() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(form)
       })
+      if (!r.ok) { const e = await r.json(); throw new Error(e.error || 'Failed') }
       const newC = await r.json()
-      setCustomers(prev => [newC, ...prev])
+      // Reload full list so totals are included
+      const listR = await fetch('/api/customers')
+      const listData = await listR.json()
+      setCustomers(Array.isArray(listData) ? listData : (listData.customers || []))
       setForm({ name: '', address: '', phone: '', email: '', notes: '' })
       setShowForm(false)
-      setSelected(newC)
+      setSelected({ id: newC.id, name: newC.name })
     } catch (e) {
-      alert('Error saving customer')
+      alert('Error saving customer: ' + e.message)
     } finally {
       setSaving(false)
+    }
+  }
+
+  async function handleCalcMileage(customerId) {
+    setCalcMileage(true)
+    try {
+      const r = await fetch(`/api/customers/${customerId}/calculate-mileage`, { method: 'POST' })
+      const data = await r.json()
+      if (data.error) { alert('Mileage error: ' + data.error); return }
+      setDetail(prev => ({ ...prev, mileage_from_home: data.mileage_from_home }))
+    } catch {
+      alert('Could not calculate mileage')
+    } finally {
+      setCalcMileage(false)
     }
   }
 
@@ -134,9 +160,9 @@ export default function Customers() {
                 <input
                   type="text"
                   value={form.phone}
-                  onChange={e => setForm(f => ({ ...f, phone: e.target.value }))}
+                  onChange={e => setForm(f => ({ ...f, phone: formatPhone(e.target.value) }))}
                   className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="(555) 555-5555"
+                  placeholder="(870) 555-1234"
                 />
               </div>
               <div>
@@ -187,14 +213,20 @@ export default function Customers() {
         )}
 
         {selected && (
-          <CustomerDetail customer={selected} detail={detail} fmt={fmt} />
+          <CustomerDetail
+            customer={selected}
+            detail={detail}
+            fmt={fmt}
+            onCalcMileage={() => handleCalcMileage(selected.id)}
+            calcMileage={calcMileage}
+          />
         )}
       </div>
     </div>
   )
 }
 
-function CustomerDetail({ customer, detail, fmt }) {
+function CustomerDetail({ customer, detail, fmt, onCalcMileage, calcMileage }) {
   if (!detail) return (
     <div className="flex items-center justify-center h-32 text-gray-400">Loading...</div>
   )
@@ -202,6 +234,10 @@ function CustomerDetail({ customer, detail, fmt }) {
   const totalRevenue = detail.jobs?.reduce((s, j) => s + (j.total_amount || 0), 0) || 0
   const totalHours = detail.time_entries?.reduce((s, t) => s + (t.hours || 0), 0) || 0
   const avgRate = totalHours > 0 ? totalRevenue / totalHours : 0
+
+  // Compute total miles driven (round-trip * number of jobs as proxy)
+  const jobCount = detail.jobs?.length || 0
+  const totalMiles = detail.mileage_from_home != null ? Math.round(detail.mileage_from_home * 2 * jobCount) : null
 
   return (
     <div className="space-y-5">
@@ -214,6 +250,36 @@ function CustomerDetail({ customer, detail, fmt }) {
             <div className="flex gap-4 mt-2">
               {detail.phone && <a href={`tel:${detail.phone}`} className="text-sm text-blue-600">{detail.phone}</a>}
               {detail.email && <a href={`mailto:${detail.email}`} className="text-sm text-blue-600">{detail.email}</a>}
+            </div>
+
+            {/* Mileage — internal only */}
+            <div className="mt-2 flex items-center gap-3 text-xs text-gray-400">
+              {detail.mileage_from_home != null ? (
+                <>
+                  <span className="bg-gray-100 rounded px-2 py-0.5">
+                    <span className="font-medium text-gray-600">{detail.mileage_from_home} mi</span> one-way from home
+                  </span>
+                  {totalMiles != null && (
+                    <span className="bg-gray-100 rounded px-2 py-0.5">
+                      ~{totalMiles} mi total driven (est.)
+                    </span>
+                  )}
+                  <span className="italic text-gray-300">internal only</span>
+                </>
+              ) : (
+                detail.address && (
+                  <span className="text-gray-400 italic">Mileage not calculated</span>
+                )
+              )}
+              {detail.address && (
+                <button
+                  onClick={onCalcMileage}
+                  disabled={calcMileage}
+                  className="text-blue-600 hover:text-blue-800 border border-blue-200 rounded px-2 py-0.5 hover:bg-blue-50 disabled:opacity-50"
+                >
+                  {calcMileage ? 'Calculating...' : detail.mileage_from_home ? 'Recalculate' : 'Calculate Mileage'}
+                </button>
+              )}
             </div>
           </div>
           <Link
