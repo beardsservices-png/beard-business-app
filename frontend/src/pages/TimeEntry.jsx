@@ -1,5 +1,14 @@
 import { useState, useEffect } from 'react'
 
+function calcHours(arrive, depart) {
+  if (!arrive || !depart) return ''
+  const [ah, am] = arrive.split(':').map(Number)
+  const [dh, dm] = depart.split(':').map(Number)
+  const mins = (dh * 60 + dm) - (ah * 60 + am)
+  if (mins <= 0) return ''
+  return Math.round(mins / 60 * 100) / 100
+}
+
 export default function TimeEntry() {
   const [entries, setEntries] = useState([])
   const [customers, setCustomers] = useState([])
@@ -10,6 +19,8 @@ export default function TimeEntry() {
   const [form, setForm] = useState({
     customer_id: '',
     entry_date: new Date().toISOString().slice(0, 10),
+    arrive_time: '',
+    depart_time: '',
     hours: '',
     description: '',
     cost_code: '',
@@ -21,14 +32,15 @@ export default function TimeEntry() {
       fetch('/api/customers').then(r => r.json()),
     ]).then(([timeData, custData]) => {
       setEntries(timeData.time_entries || [])
-      setCustomers((custData.customers || []).filter(c => !c.name.startsWith('_')))
+      setCustomers((Array.isArray(custData) ? custData : []).filter(c => !c.name.startsWith('_')))
       setLoading(false)
     }).catch(() => setLoading(false))
   }, [])
 
   async function handleSave() {
-    if (!form.customer_id || !form.hours || !form.entry_date) {
-      alert('Customer, date, and hours are required.')
+    const hours = form.hours || calcHours(form.arrive_time, form.depart_time)
+    if (!form.customer_id || !form.entry_date || !hours) {
+      alert('Customer, date, and either arrive/depart times or hours are required.')
       return
     }
     setSaving(true)
@@ -38,7 +50,7 @@ export default function TimeEntry() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...form,
-          hours: parseFloat(form.hours),
+          hours: parseFloat(hours),
           customer_id: parseInt(form.customer_id),
         })
       })
@@ -46,6 +58,8 @@ export default function TimeEntry() {
       setEntries(prev => [newEntry, ...prev])
       setForm(f => ({
         ...f,
+        arrive_time: '',
+        depart_time: '',
         hours: '',
         description: '',
         cost_code: '',
@@ -118,25 +132,35 @@ export default function TimeEntry() {
               />
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">Hours *</label>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Arrive *</label>
               <input
-                type="number"
-                step="0.25"
-                min="0.25"
-                max="24"
-                value={form.hours}
-                onChange={e => setForm(f => ({ ...f, hours: e.target.value }))}
-                placeholder="e.g. 3.5"
+                type="time"
+                value={form.arrive_time}
+                onChange={e => setForm(f => ({ ...f, arrive_time: e.target.value }))}
                 className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
             <div>
-              <label className="block text-xs font-medium text-gray-700 mb-1">Cost Code</label>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Depart *</label>
+              <input
+                type="time"
+                value={form.depart_time}
+                onChange={e => setForm(f => ({ ...f, depart_time: e.target.value }))}
+                className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+            {calcHours(form.arrive_time, form.depart_time) && (
+              <div className="col-span-2 text-sm text-green-700 font-medium bg-green-50 border border-green-200 rounded-lg px-3 py-2">
+                Duration: {calcHours(form.arrive_time, form.depart_time)}h
+              </div>
+            )}
+            <div>
+              <label className="block text-xs font-medium text-gray-700 mb-1">Job / Purpose</label>
               <input
                 type="text"
                 value={form.cost_code}
                 onChange={e => setForm(f => ({ ...f, cost_code: e.target.value }))}
-                placeholder="e.g. DECK, HVAC"
+                placeholder="e.g. Johnson fence repair, supply run"
                 className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
             </div>
@@ -205,6 +229,9 @@ export default function TimeEntry() {
                 <div key={entry.id} className="px-5 py-3 flex items-center justify-between">
                   <div className="flex-1 min-w-0">
                     <div className="text-sm font-medium text-gray-900">{entry.customer_name || '—'}</div>
+                    {entry.start_time && entry.end_time && (
+                      <div className="text-xs text-gray-400">{entry.start_time} &ndash; {entry.end_time}</div>
+                    )}
                     {entry.description && (
                       <div className="text-xs text-gray-500 mt-0.5 truncate">{entry.description}</div>
                     )}
@@ -229,9 +256,9 @@ export default function TimeEntry() {
         ))}
         {sortedDates.length === 0 && (
           <div className="bg-white rounded-xl border border-gray-200 px-5 py-16 text-center text-gray-400">
-            <div className="text-3xl mb-3">⏱</div>
+            <div className="text-3xl mb-3">&#9201;</div>
             <div className="text-lg font-medium mb-1">No time entries yet</div>
-            <div className="text-sm">Click "Log Time" to add your first entry</div>
+            <div className="text-sm">Click &quot;Log Time&quot; to add your first entry</div>
           </div>
         )}
       </div>

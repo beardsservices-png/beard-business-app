@@ -11,13 +11,13 @@ export default function Jobs() {
   useEffect(() => {
     fetch('/api/jobs')
       .then(r => r.json())
-      .then(data => { setJobs(data.jobs || []); setLoading(false) })
+      .then(data => { setJobs(Array.isArray(data) ? data : []); setLoading(false) })
       .catch(() => setLoading(false))
   }, [])
 
   const filtered = jobs.filter(j => {
     const matchSearch = !search ||
-      (j.customer_name || '').toLowerCase().includes(search.toLowerCase()) ||
+      (j.customer || '').toLowerCase().includes(search.toLowerCase()) ||
       (j.invoice_id || '').toLowerCase().includes(search.toLowerCase())
     const matchStatus = statusFilter === 'all' || j.status === statusFilter
     return matchSearch && matchStatus
@@ -99,7 +99,7 @@ export default function Jobs() {
               className="grid grid-cols-12 px-5 py-3 hover:bg-gray-50 cursor-pointer items-center"
             >
               <div className="col-span-3 font-medium text-gray-900 text-sm truncate pr-2">
-                {job.customer_name || '—'}
+                {job.customer || '—'}
               </div>
               <div className="col-span-2 text-sm text-gray-600">
                 {job.invoice_id || `#${job.id}`}
@@ -111,7 +111,7 @@ export default function Jobs() {
                 {fmt(job.total_labor)}
               </div>
               <div className="col-span-2 text-right text-sm font-semibold text-gray-900">
-                {fmt(job.total_amount)}
+                {fmt((job.total_labor || 0) + (job.total_materials || 0))}
               </div>
               <div className="col-span-1">
                 <StatusBadge status={job.status} />
@@ -144,7 +144,7 @@ export default function Jobs() {
           <div>
             <span className="text-gray-500">Total Revenue: </span>
             <span className="font-semibold text-gray-900">
-              {fmt(filtered.reduce((s, j) => s + (j.total_amount || 0), 0))}
+              {fmt(filtered.reduce((s, j) => s + (j.total_labor || 0) + (j.total_materials || 0), 0))}
             </span>
           </div>
           <div>

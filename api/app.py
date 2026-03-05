@@ -55,6 +55,36 @@ def migrate_db():
     except Exception:
         pass
 
+    # payments table
+    cursor.execute('''CREATE TABLE IF NOT EXISTS payments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id INTEGER REFERENCES jobs(id),
+        customer_id INTEGER REFERENCES customers(id),
+        amount REAL NOT NULL,
+        payment_date TEXT,
+        payment_method TEXT DEFAULT 'cash',
+        memo TEXT,
+        created_at TEXT DEFAULT (datetime('now'))
+    )''')
+
+    # Bulk-mark historical completed jobs as paid (one-time migration)
+    try:
+        cursor.execute('''
+            INSERT INTO payments (job_id, customer_id, amount, payment_date, payment_method, memo)
+            SELECT j.id, j.customer_id,
+                   COALESCE(i.total_labor, 0) + COALESCE(i.total_materials, 0),
+                   COALESCE(i.invoice_date, j.start_date, '2024-01-01'),
+                   'Other',
+                   'Historical payment (imported)'
+            FROM jobs j
+            LEFT JOIN invoices i ON j.id = i.job_id
+            WHERE j.status = 'completed'
+              AND (COALESCE(i.total_labor, 0) + COALESCE(i.total_materials, 0)) > 0
+              AND j.id NOT IN (SELECT DISTINCT job_id FROM payments WHERE job_id IS NOT NULL)
+        ''')
+    except Exception:
+        pass
+
     conn.commit()
     conn.close()
 
@@ -97,7 +127,7 @@ def dashboard():
         inv_date_params = [start, end]
         inv_simple_filter = "AND invoice_date BETWEEN ? AND ?"
         inv_simple_params = [start, end]
-        te_date_filter = "AND date BETWEEN ? AND ?"
+        te_date_filter = "AND entry_date BETWEEN ? AND ?"
         te_date_params = [start, end]
         job_date_filter = "AND j.start_date BETWEEN ? AND ?"
         job_date_params = [start, end]
@@ -108,7 +138,7 @@ def dashboard():
         inv_date_params = [start]
         inv_simple_filter = "AND invoice_date >= ?"
         inv_simple_params = [start]
-        te_date_filter = "AND date >= ?"
+        te_date_filter = "AND entry_date >= ?"
         te_date_params = [start]
         job_date_filter = "AND j.start_date >= ?"
         job_date_params = [start]
@@ -119,7 +149,7 @@ def dashboard():
         inv_date_params = [end]
         inv_simple_filter = "AND invoice_date <= ?"
         inv_simple_params = [end]
-        te_date_filter = "AND date <= ?"
+        te_date_filter = "AND entry_date <= ?"
         te_date_params = [end]
         job_date_filter = "AND j.start_date <= ?"
         job_date_params = [end]
@@ -323,7 +353,7 @@ def list_customers():
     cursor = conn.cursor()
 
     cursor.execute('''
-        SELECT c.id, c.name, c.phone, c.email, c.address, c.notes, c.mileage_from_home,
+        SELECT c.id, c.name, c.phone, c.email, c.address, c.notes, c.cya_notes, c.mileage_from_home,
                COALESCE(j_count.cnt, 0) as job_count,
                COALESCE(inv.labor, 0) as total_labor,
                COALESCE(te.hours, 0) as total_hours
@@ -615,8 +645,18 @@ def convert_to_invoice(job_id):
     """Convert an estimate to an invoice."""
     conn = get_db()
     cursor = conn.cursor()
-    cursor.execute("UPDATE jobs SET status = 'completed' WHERE id = ?", (job_id,))
-    cursor.execute("UPDATE invoices SET status = 'paid' WHERE job_id = ?", (job_id,))
+
+    # Get current invoice number
+    inv = cursor.execute('SELECT id, invoice_number FROM invoices WHERE job_id = ?', (job_id,)).fetchone()
+
+    # Rename EST->BHS in invoice number
+    if inv and inv['invoice_number'] and inv['invoice_number'].startswith('EST'):
+        new_num = 'BHS' + inv['invoice_number'][3:]
+        cursor.execute('UPDATE invoices SET invoice_number = ? WHERE job_id = ?', (new_num, job_id))
+        cursor.execute('UPDATE jobs SET invoice_id = ?, status = ? WHERE id = ?', (new_num, 'pending', job_id))
+    else:
+        cursor.execute("UPDATE jobs SET status = 'pending' WHERE id = ?", (job_id,))
+
     conn.commit()
     conn.close()
     return jsonify({'message': 'Converted to invoice', 'job_id': job_id})
@@ -1071,7 +1111,7 @@ def list_time_entries():
     end_date = request.args.get('end_date')
 
     query = '''
-        SELECT t.id, t.entry_date, t.hours, t.description, t.cost_code,
+        SELECT t.id, t.entry_date, t.start_time, t.end_time, t.hours, t.description, t.cost_code,
                c.name as customer, j.invoice_id
         FROM time_entries t
         LEFT JOIN customers c ON t.customer_id = c.id
@@ -1101,18 +1141,29 @@ def list_time_entries():
 @app.route('/api/time-entries', methods=['POST'])
 def add_time_entry():
     data = request.json
-    required = ['customer_id', 'entry_date', 'hours']
+    required = ['customer_id', 'entry_date']
     for field in required:
         if field not in data:
             return jsonify({'error': f'Missing required field: {field}'}), 400
 
+    arrive = data.get('arrive_time')  # e.g. "08:30"
+    depart = data.get('depart_time')  # e.g. "11:45"
+    hours = data.get('hours')
+    if arrive and depart and not hours:
+        from datetime import datetime as _dt
+        fmt = '%H:%M'
+        delta = _dt.strptime(depart, fmt) - _dt.strptime(arrive, fmt)
+        hours = round(delta.seconds / 3600, 2)
+    if not hours:
+        return jsonify({'error': 'Either hours or arrive/depart times are required'}), 400
+
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT INTO time_entries (customer_id, job_id, entry_date, hours, description, source)
-        VALUES (?, ?, ?, ?, ?, 'app')
+        INSERT INTO time_entries (customer_id, job_id, entry_date, start_time, end_time, hours, description, cost_code, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'app')
     ''', (data['customer_id'], data.get('job_id'), data['entry_date'],
-          data['hours'], data.get('description', '')))
+          arrive, depart, hours, data.get('description', ''), data.get('cost_code', '')))
     entry_id = cursor.lastrowid
     conn.commit()
     conn.close()

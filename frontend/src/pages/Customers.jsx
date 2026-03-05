@@ -192,8 +192,8 @@ export default function Customers() {
               </div>
               <div className="col-span-2">
                 <label className="block text-xs font-medium text-gray-700 mb-1">
-                  CYA Notes
-                  <span className="ml-1 font-normal text-gray-400">— gate codes, pets, preferences, warnings</span>
+                  Notes
+                  <span className="ml-1 font-normal text-gray-400">— gate codes, pets, access instructions, job preferences</span>
                 </label>
                 <textarea
                   value={form.cya_notes}
@@ -331,11 +331,11 @@ function CustomerDetail({ customer, detail, fmt, onCalcMileage, calcMileage, onD
         </div>
         {detail.notes && <p className="mt-3 text-sm text-gray-600 bg-gray-50 rounded-lg p-3">{detail.notes}</p>}
 
-        {/* CYA Notes */}
+        {/* Notes */}
         <div className="mt-4 border border-amber-300 rounded-xl bg-amber-50 p-4">
           <div className="mb-2">
-            <span className="text-sm font-semibold text-amber-900">CYA Notes</span>
-            <span className="ml-2 text-xs text-amber-700">Cover Your Ass — gate codes, pets, preferences, warnings</span>
+            <span className="text-sm font-semibold text-amber-900">Notes</span>
+            <span className="ml-2 text-xs text-amber-700">gate codes, pets, access instructions, job preferences</span>
           </div>
           <textarea
             rows={4}

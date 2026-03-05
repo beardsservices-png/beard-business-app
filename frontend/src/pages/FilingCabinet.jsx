@@ -83,6 +83,7 @@ export default function FilingCabinet() {
     amount: '', payment_method: 'cash', payment_date: new Date().toISOString().slice(0, 10), memo: '',
   })
   const [addingPayment, setAddingPayment] = useState(false)
+  const [converting, setConverting] = useState(false)
 
   useEffect(() => {
     // Check ?job= param
@@ -248,6 +249,26 @@ export default function FilingCabinet() {
       alert('Could not calculate mileage')
     } finally {
       setCalcMileage(false)
+    }
+  }
+
+  // ── Convert estimate to invoice ───────────────────────────────
+  async function handleConvert() {
+    if (!window.confirm('Convert this estimate to an invoice? The EST number will become a BHS number.')) return
+    setConverting(true)
+    try {
+      await fetch(`${API}/jobs/${detail.job_id}/convert`, { method: 'POST' })
+      // Refresh job list and selected job
+      const [listRes, jobRes] = await Promise.all([
+        fetch(`${API}/filing-cabinet`).then(r => r.json()),
+        fetch(`${API}/filing-cabinet/${detail.job_id}`).then(r => r.json()),
+      ])
+      setJobs(listRes.jobs || listRes || [])
+      setDetail(jobRes)
+    } catch {
+      alert('Error converting estimate')
+    } finally {
+      setConverting(false)
     }
   }
 
@@ -426,6 +447,15 @@ export default function FilingCabinet() {
                 >
                   {linkCopied ? 'Copied!' : 'Copy Print Link'}
                 </button>
+                {detail.status === 'estimate' && (
+                  <button
+                    onClick={handleConvert}
+                    disabled={converting}
+                    className="bg-green-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-green-700 disabled:opacity-50 font-medium"
+                  >
+                    {converting ? 'Converting...' : 'Convert to Invoice \u2192'}
+                  </button>
+                )}
                 {edited && (
                   <button
                     onClick={handleSave}

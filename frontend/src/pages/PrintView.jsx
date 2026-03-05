@@ -49,7 +49,7 @@ export default function PrintView() {
           to={`/filing-cabinet?job=${jobId}`}
           className="text-sm text-gray-600 hover:text-gray-900"
         >
-          ← Back to Filing Cabinet
+          &larr; Back to Filing Cabinet
         </Link>
         <button
           onClick={handlePrint}
@@ -61,24 +61,34 @@ export default function PrintView() {
 
       {/* Printable document */}
       <div ref={printRef} className="bg-white max-w-3xl mx-auto rounded-xl border border-gray-200 print:border-0 print:max-w-full print:rounded-none p-10 print:p-8">
-        {/* Header */}
-        <div className="flex items-start justify-between mb-10">
-          <div>
-            <h1 className="text-3xl font-bold text-gray-900">Beard's Home Services</h1>
-            <p className="text-gray-500 mt-1">Mountain Home, AR</p>
-            <p className="text-gray-500 text-sm">Licensed &amp; Insured</p>
-          </div>
-          <div className="text-right">
-            <div className="text-2xl font-bold text-blue-600">{docType}</div>
-            <div className="text-lg font-semibold text-gray-800 mt-1">{docNumber}</div>
-            <div className="text-sm text-gray-500 mt-1">Date: {job.start_date || '—'}</div>
+
+        {/* Header — business card style */}
+        <div className="bg-gradient-to-r from-blue-700 to-blue-900 text-white rounded-xl p-8 mb-8 print:rounded-none">
+          <div className="flex items-start justify-between">
+            <div className="flex items-center gap-4">
+              <div className="w-14 h-14 bg-white rounded-xl flex items-center justify-center text-blue-800 font-black text-xl shrink-0">
+                BHS
+              </div>
+              <div>
+                <h1 className="text-2xl font-bold">Beard&apos;s Home Services</h1>
+                <p className="text-blue-200 text-sm">Mountain Home, AR 72653</p>
+                <p className="text-blue-200 text-sm">Licensed &amp; Insured</p>
+              </div>
+            </div>
+            <div className="text-right">
+              <div className={`text-3xl font-black ${isEstimate ? 'text-yellow-300' : 'text-green-300'}`}>
+                {docType}
+              </div>
+              <div className="text-xl font-bold mt-1">{docNumber}</div>
+              <div className="text-blue-200 text-sm mt-1">Date: {job.start_date || '\u2014'}</div>
+            </div>
           </div>
         </div>
 
         {/* Bill To */}
-        <div className="mb-8">
-          <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Bill To</div>
-          <div className="text-lg font-semibold text-gray-900">{job.customer_name}</div>
+        <div className="bg-gray-50 rounded-lg border border-gray-200 p-4 mb-8">
+          <div className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Bill To</div>
+          <div className="text-lg font-bold text-gray-900">{job.customer_name}</div>
           {job.customer_address && (
             <div className="text-gray-600 text-sm mt-0.5">{job.customer_address}</div>
           )}
@@ -87,20 +97,20 @@ export default function PrintView() {
         {/* Line Items */}
         <table className="w-full mb-8">
           <thead>
-            <tr className="border-b-2 border-gray-900">
-              <th className="text-left py-2 text-sm font-semibold text-gray-700 w-3/5">Description</th>
-              <th className="text-left py-2 text-sm font-semibold text-gray-700 w-1/5">Type</th>
-              <th className="text-right py-2 text-sm font-semibold text-gray-700 w-1/5">Amount</th>
+            <tr className="border-b-2 border-gray-300 bg-gray-50">
+              <th className="text-left py-3 px-3 text-sm font-semibold text-gray-700 w-3/5 rounded-tl-lg">Description</th>
+              <th className="text-left py-3 px-3 text-sm font-semibold text-gray-700 w-1/5">Type</th>
+              <th className="text-right py-3 px-3 text-sm font-semibold text-gray-700 w-1/5 rounded-tr-lg">Amount</th>
             </tr>
           </thead>
           <tbody>
             {services.map((svc, idx) => (
-              <tr key={idx} className="border-b border-gray-100">
-                <td className="py-2.5 text-sm text-gray-800 pr-4">
+              <tr key={idx} className={`border-b border-gray-100 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`}>
+                <td className="py-2.5 px-3 text-sm text-gray-800 pr-4">
                   {svc.standardized_description || svc.original_description}
                 </td>
-                <td className="py-2.5 text-sm text-gray-500 capitalize">{svc.service_type || 'labor'}</td>
-                <td className="py-2.5 text-sm font-medium text-gray-900 text-right">{fmt(svc.amount)}</td>
+                <td className="py-2.5 px-3 text-sm text-gray-500 capitalize">{svc.service_type || 'labor'}</td>
+                <td className="py-2.5 px-3 text-sm font-medium text-gray-900 text-right">{fmt(svc.amount)}</td>
               </tr>
             ))}
             {services.length === 0 && (
@@ -113,7 +123,7 @@ export default function PrintView() {
 
         {/* Totals */}
         <div className="flex justify-end mb-10">
-          <div className="w-64 space-y-2">
+          <div className="w-72 bg-gray-50 rounded-xl border border-gray-200 p-4 space-y-2">
             {totalLabor > 0 && (
               <div className="flex justify-between text-sm">
                 <span className="text-gray-600">Labor Subtotal</span>
@@ -126,8 +136,8 @@ export default function PrintView() {
                 <span className="font-medium">{fmt(totalMaterials)}</span>
               </div>
             )}
-            <div className="flex justify-between text-lg font-bold text-gray-900 pt-2 border-t-2 border-gray-900">
-              <span>Total Due</span>
+            <div className="flex justify-between text-xl font-black text-blue-800 pt-3 border-t-2 border-blue-800">
+              <span>Total {isEstimate ? 'Estimate' : 'Due'}</span>
               <span>{fmt(grandTotal)}</span>
             </div>
           </div>
@@ -135,25 +145,25 @@ export default function PrintView() {
 
         {/* Notes */}
         {job.notes && (
-          <div className="mb-8 bg-gray-50 rounded-lg p-4">
-            <div className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-1">Notes</div>
+          <div className="mb-8 bg-gray-50 rounded-lg border border-gray-200 p-4">
+            <div className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">Notes</div>
             <div className="text-sm text-gray-700">{job.notes}</div>
           </div>
         )}
 
         {/* Footer */}
-        <div className="border-t border-gray-200 pt-6 text-center">
+        <div className="border-t-2 border-gray-200 pt-6 text-center">
           {isEstimate ? (
-            <div className="text-sm text-gray-500">
-              This estimate is valid for 30 days. Thank you for considering Beard's Home Services!
+            <div className="text-sm font-medium text-gray-600">
+              Thank you for considering Beard&apos;s Home Services! This estimate is valid for 30 days.
             </div>
           ) : (
-            <div className="text-sm text-gray-500">
-              Thank you for your business! Payment due upon receipt.
+            <div className="text-sm font-medium text-gray-600">
+              Thank you for your business! We appreciate you choosing Beard&apos;s Home Services.
             </div>
           )}
           <div className="text-xs text-gray-400 mt-2">
-            Beard's Home Services · Mountain Home, AR · Licensed &amp; Insured
+            Beard&apos;s Home Services &middot; Mountain Home, AR 72653 &middot; Licensed &amp; Insured
           </div>
         </div>
       </div>
