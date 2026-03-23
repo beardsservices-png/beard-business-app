@@ -55,6 +55,18 @@ def migrate_db():
     except Exception:
         pass
 
+    # data_status on jobs (e.g. 'incomplete' to flag missing time entries)
+    try:
+        conn.execute("ALTER TABLE jobs ADD COLUMN data_status TEXT DEFAULT NULL")
+    except:
+        pass
+
+    # trip_skip on time_entries (1 = user dismissed the suggested-trip prompt)
+    try:
+        conn.execute("ALTER TABLE time_entries ADD COLUMN trip_skip INTEGER DEFAULT 0")
+    except:
+        pass
+
     # payments table
     cursor.execute('''CREATE TABLE IF NOT EXISTS payments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -310,17 +322,37 @@ def dashboard():
     ''', job_date_params)
     est_row = cursor.fetchone()
 
+    # Hourly rate: exclude incomplete jobs from both labor and hours
+    cursor2 = conn.cursor()
+    cursor2.execute(f'''
+        SELECT SUM(i.total_labor) as labor
+        FROM invoices i
+        LEFT JOIN jobs j ON i.job_id = j.id
+        WHERE 1=1 {inv_date_filter}
+          AND (j.data_status IS NULL OR j.data_status != 'incomplete')
+    ''', inv_date_params)
+    rate_labor_row = cursor2.fetchone()
+
+    cursor2.execute(f'''
+        SELECT SUM(hours) as total FROM time_entries
+        WHERE 1=1 {te_date_filter}
+          AND (job_id IS NULL OR job_id NOT IN (SELECT id FROM jobs WHERE data_status = 'incomplete'))
+    ''', te_date_params)
+    rate_hours_row = cursor2.fetchone()
+
     conn.close()
 
     total_hours = hours['total'] or 0
     total_labor = revenue['labor'] or 0
+    rate_hours = rate_hours_row['total'] or 0
+    rate_labor = rate_labor_row['labor'] or 0
 
     response = {
         'total_labor': total_labor,
         'total_materials': revenue['materials'] or 0,
         'total_revenue': total_labor + (revenue['materials'] or 0),
         'total_hours': total_hours,
-        'avg_hourly_rate': round(total_labor / total_hours, 2) if total_hours > 0 else 0,
+        'avg_hourly_rate': round(rate_labor / rate_hours, 2) if rate_hours > 0 else 0,
         'avg_days_per_job': round(avg_days_row['avg_days'], 1) if avg_days_row and avg_days_row['avg_days'] else 0,
         'customer_count': customers['count'],
         'job_count': jobs_count['count'],
@@ -686,7 +718,8 @@ def filing_cabinet_list():
                COALESCE((SELECT SUM(hours) FROM time_entries WHERE job_id = j.id), 0) as total_hours,
                COALESCE((SELECT COUNT(DISTINCT entry_date) FROM time_entries WHERE job_id = j.id), 0) as actual_days,
                (SELECT COUNT(*) FROM time_entries WHERE job_id = j.id) as time_entry_count,
-               COALESCE((SELECT SUM(amount) FROM payments WHERE job_id = j.id), 0) as total_paid
+               COALESCE((SELECT SUM(amount) FROM payments WHERE job_id = j.id), 0) as total_paid,
+               j.data_status
         FROM jobs j
         JOIN customers c ON j.customer_id = c.id
         LEFT JOIN invoices i ON j.id = i.job_id
@@ -999,6 +1032,150 @@ def filing_cabinet_update(job_id):
     except Exception as e:
         conn.close()
         return jsonify({'error': str(e)}), 500
+
+
+# ============================================================
+# DATA GAPS / COMPLETENESS
+# ============================================================
+
+@app.route('/api/data-gaps', methods=['GET'])
+def get_data_gaps():
+    conn = get_db()
+
+    # Gap 1+3: Invoices/jobs with no time entries linked
+    missing_te = conn.execute("""
+        SELECT j.id as job_id,
+               COALESCE(i.invoice_number, j.invoice_id) as invoice_number,
+               i.invoice_date,
+               c.name as customer_name,
+               j.customer_id,
+               COALESCE(i.total_amount, 0) as total_amount,
+               j.data_status,
+               COUNT(sp.id) as service_count
+        FROM jobs j
+        JOIN customers c ON j.customer_id = c.id
+        LEFT JOIN invoices i ON j.id = i.job_id
+        LEFT JOIN services_performed sp ON sp.job_id = j.id
+        WHERE j.status IN ('completed', 'paid', 'pending')
+          AND (j.data_status IS NULL OR j.data_status != 'incomplete')
+          AND c.name != 'test'
+          AND NOT EXISTS (SELECT 1 FROM time_entries te WHERE te.job_id = j.id)
+        GROUP BY j.id
+        ORDER BY i.invoice_date DESC
+    """).fetchall()
+
+    # Gap 2: Time entries with no job linked
+    unlinked_te = conn.execute("""
+        SELECT te.id, te.entry_date, te.start_time, te.end_time, te.hours,
+               te.description, te.customer_id, te.busybusy_project,
+               c.name as customer_name
+        FROM time_entries te
+        LEFT JOIN customers c ON te.customer_id = c.id
+        WHERE te.job_id IS NULL
+        ORDER BY te.entry_date DESC
+    """).fetchall()
+
+    # Gap 4: Overhead - last overhead date and weeks since
+    overhead_row = conn.execute("""
+        SELECT MAX(expense_date) as last_overhead_date
+        FROM materials_expenses
+        WHERE is_overhead = 1
+    """).fetchone()
+    last_oh = overhead_row['last_overhead_date'] if overhead_row else None
+    if last_oh:
+        weeks_since = conn.execute(
+            "SELECT CAST((julianday('now') - julianday(?)) / 7 AS INTEGER) as w",
+            (last_oh,)
+        ).fetchone()['w']
+    else:
+        weeks_since = 99
+
+    # Gap 5: Suggested trips - time entries that are sole entry for job+date,
+    # have start+end time, customer has mileage, no trip exists for that job+date,
+    # and trip_skip != 1
+    suggested_trips = conn.execute("""
+        SELECT te.id as time_entry_id,
+               te.job_id,
+               te.entry_date,
+               te.customer_id,
+               te.hours,
+               te.start_time,
+               te.end_time,
+               c.name as customer_name,
+               c.address as customer_address,
+               c.mileage_from_home
+        FROM time_entries te
+        JOIN customers c ON te.customer_id = c.id
+        WHERE te.job_id IS NOT NULL
+          AND te.start_time IS NOT NULL
+          AND te.end_time IS NOT NULL
+          AND c.mileage_from_home IS NOT NULL
+          AND c.mileage_from_home > 0
+          AND (te.trip_skip IS NULL OR te.trip_skip != 1)
+          AND NOT EXISTS (
+              SELECT 1 FROM trips tr
+              WHERE tr.job_id = te.job_id
+                AND tr.trip_date = te.entry_date
+          )
+          AND (
+              SELECT COUNT(*) FROM time_entries te2
+              WHERE te2.job_id = te.job_id
+                AND te2.entry_date = te.entry_date
+          ) = 1
+        ORDER BY te.entry_date DESC
+        LIMIT 50
+    """).fetchall()
+
+    conn.close()
+    return jsonify({
+        'missing_time_entries': [dict(r) for r in missing_te],
+        'unlinked_time_entries': [dict(r) for r in unlinked_te],
+        'overhead_gap': {
+            'zero_overhead_weeks': weeks_since,
+            'last_overhead_date': last_oh
+        },
+        'suggested_trips': [dict(r) for r in suggested_trips]
+    })
+
+
+@app.route('/api/jobs/<int:job_id>/mark-incomplete', methods=['POST'])
+def mark_job_incomplete(job_id):
+    conn = get_db()
+    conn.execute("UPDATE jobs SET data_status = 'incomplete' WHERE id = ?", (job_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'job_id': job_id, 'data_status': 'incomplete'})
+
+
+@app.route('/api/suggested-trips/<int:te_id>/confirm', methods=['POST'])
+def confirm_suggested_trip(te_id):
+    conn = get_db()
+    te = conn.execute("""
+        SELECT te.entry_date, te.job_id, te.customer_id,
+               c.address, c.mileage_from_home, c.name
+        FROM time_entries te
+        JOIN customers c ON te.customer_id = c.id
+        WHERE te.id = ?
+    """, (te_id,)).fetchone()
+    if not te:
+        conn.close()
+        return jsonify({'error': 'Time entry not found'}), 404
+    conn.execute("""
+        INSERT INTO trips (trip_date, trip_type, destination, customer_id, job_id, miles, notes)
+        VALUES (?, 'job_site', ?, ?, ?, ?, 'Auto-generated from time entry')
+    """, (te['entry_date'], te['address'], te['customer_id'], te['job_id'], te['mileage_from_home']))
+    conn.commit()
+    conn.close()
+    return jsonify({'message': 'Trip confirmed', 'miles': te['mileage_from_home']})
+
+
+@app.route('/api/suggested-trips/<int:te_id>/skip', methods=['POST'])
+def skip_suggested_trip(te_id):
+    conn = get_db()
+    conn.execute("UPDATE time_entries SET trip_skip = 1 WHERE id = ?", (te_id,))
+    conn.commit()
+    conn.close()
+    return jsonify({'message': 'Skipped'})
 
 
 # ============================================================
@@ -2096,6 +2273,24 @@ def pl_report():
     unplanned_count = waste_row['count'] or 0
     unplanned_cost = round(unplanned_miles * 0.70, 2)
 
+    # --- Effective hourly rate: exclude incomplete jobs ---
+    cursor.execute(f'''
+        SELECT COALESCE(SUM(i.total_labor), 0) as labor
+        FROM invoices i
+        LEFT JOIN jobs j ON i.job_id = j.id
+        WHERE 1=1 {inv_df} {cust_inv_df} {cat_inv_df}
+          AND (j.data_status IS NULL OR j.data_status != 'incomplete')
+    ''', inv_dp + cust_inv_dp + cat_inv_dp)
+    rate_labor_row = cursor.fetchone()
+
+    cursor.execute(f'''
+        SELECT COALESCE(SUM(te.hours), 0) as hours
+        FROM time_entries te
+        WHERE 1=1 {te_df} {cust_te_df}
+          AND (te.job_id IS NULL OR te.job_id NOT IN (SELECT id FROM jobs WHERE data_status = 'incomplete'))
+    ''', te_dp + cust_te_dp)
+    rate_hours_row = cursor.fetchone()
+
     conn.close()
 
     total_revenue = rev_row['total_amount'] or 0
@@ -2106,7 +2301,9 @@ def pl_report():
     total_job_expenses = exp_row['total_job_expenses'] or 0
     total_hours = hours_row['total_hours'] or 0
     net_profit = total_revenue - total_expenses
-    effective_rate = round(total_labor_rev / total_hours, 2) if total_hours > 0 else 0
+    rate_labor = rate_labor_row['labor'] or 0
+    rate_hours = rate_hours_row['hours'] or 0
+    effective_rate = round(rate_labor / rate_hours, 2) if rate_hours > 0 else 0
 
     return jsonify({
         'summary': {

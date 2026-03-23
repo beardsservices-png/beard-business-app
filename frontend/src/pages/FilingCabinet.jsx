@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, Fragment } from 'react'
 import { Link } from 'react-router-dom'
 
 function useCopyToClipboard() {
@@ -62,6 +62,7 @@ const TABS = [
   { key: 'all',      label: 'All',       match: null },
   { key: 'estimate', label: 'Estimates', match: ['estimate'] },
   { key: 'invoice',  label: 'Invoices',  match: ['completed', 'paid', 'pending'] },
+  { key: 'gaps',     label: 'Data Gaps', match: null },
 ]
 
 // ─────────────────────────────────────────────────────────────────
@@ -84,6 +85,21 @@ export default function FilingCabinet() {
   })
   const [addingPayment, setAddingPayment] = useState(false)
   const [converting, setConverting] = useState(false)
+
+  // ── Data Gaps state ───────────────────────────────────────────
+  const [gaps, setGaps] = useState(null)
+  const [gapsLoading, setGapsLoading] = useState(false)
+  const [allJobs, setAllJobs] = useState([])
+  const [hoursForm, setHoursForm] = useState({})
+  const [linkJob, setLinkJob] = useState({})
+  const today = new Date().toISOString().slice(0, 10)
+  const [overheadForm, setOverheadForm] = useState({
+    expense_date: today, expense_category: 'Fuel & Transportation',
+    cost: '', vendor: '', notes: '',
+  })
+  const [gapSections, setGapSections] = useState({
+    missing_time: true, unlinked: true, overhead: true, suggested: true,
+  })
 
   useEffect(() => {
     // Check ?job= param
@@ -115,6 +131,32 @@ export default function FilingCabinet() {
     const r = await fetch(`${API}/filing-cabinet`)
     const data = await r.json()
     setJobs(data.jobs || data || [])
+  }, [])
+
+  // Load gaps when the gaps tab is active
+  useEffect(() => {
+    if (statusFilter !== 'gaps') return
+    setGapsLoading(true)
+    Promise.all([
+      fetch(`${API}/data-gaps`).then(r => r.json()),
+      fetch(`${API}/jobs`).then(r => r.json()),
+    ]).then(([gapData, jobList]) => {
+      setGaps(gapData)
+      setAllJobs(Array.isArray(jobList) ? jobList : [])
+      setGapsLoading(false)
+    }).catch(() => setGapsLoading(false))
+  }, [statusFilter])
+
+  const refreshGaps = useCallback(() => {
+    setGapsLoading(true)
+    Promise.all([
+      fetch(`${API}/data-gaps`).then(r => r.json()),
+      fetch(`${API}/jobs`).then(r => r.json()),
+    ]).then(([gapData, jobList]) => {
+      setGaps(gapData)
+      setAllJobs(Array.isArray(jobList) ? jobList : [])
+      setGapsLoading(false)
+    }).catch(() => setGapsLoading(false))
   }, [])
 
   // Filter sidebar
@@ -344,18 +386,32 @@ export default function FilingCabinet() {
             onChange={e => setSearch(e.target.value)}
             className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 mb-2"
           />
-          <div className="flex gap-1">
-            {TABS.map(tab => (
-              <button
-                key={tab.key}
-                onClick={() => setStatusFilter(tab.key)}
-                className={`flex-1 py-1 text-xs rounded-md font-medium transition-colors ${
-                  statusFilter === tab.key ? 'bg-blue-100 text-blue-700' : 'text-gray-500 hover:bg-gray-100'
-                }`}
-              >
-                {tab.label}
-              </button>
-            ))}
+          <div className="flex gap-1 flex-wrap">
+            {TABS.map(tab => {
+              const isGaps = tab.key === 'gaps'
+              const isActive = statusFilter === tab.key
+              const gapCount = gaps
+                ? (gaps.missing_time_entries?.length || 0) + (gaps.unlinked_time_entries?.length || 0) + (gaps.suggested_trips?.length || 0)
+                : null
+              return (
+                <button
+                  key={tab.key}
+                  onClick={() => setStatusFilter(tab.key)}
+                  className={`flex-1 py-1 text-xs rounded-md font-medium transition-colors flex items-center justify-center gap-1 ${
+                    isActive
+                      ? isGaps ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'
+                      : isGaps ? 'text-amber-600 hover:bg-amber-50' : 'text-gray-500 hover:bg-gray-100'
+                  }`}
+                >
+                  {tab.label}
+                  {isGaps && gapCount !== null && gapCount > 0 && (
+                    <span className="bg-amber-500 text-white text-xs font-bold rounded-full px-1.5 py-0 leading-5 min-w-5 text-center">
+                      {gapCount}
+                    </span>
+                  )}
+                </button>
+              )
+            })}
           </div>
         </div>
 
@@ -375,7 +431,14 @@ export default function FilingCabinet() {
                   <div className="font-medium text-gray-900 text-sm truncate flex-1 mr-2">
                     {job.customer || 'Unknown'}
                   </div>
-                  <StatusBadge status={job.status} />
+                  <div className="flex items-center gap-1 flex-shrink-0">
+                    {job.data_status === 'incomplete' && (
+                      <span className="text-xs px-1.5 py-0.5 rounded-full font-medium bg-amber-100 text-amber-700">
+                        Incomplete
+                      </span>
+                    )}
+                    <StatusBadge status={job.status} />
+                  </div>
                 </div>
                 <div className="flex items-center justify-between">
                   <div className="text-xs text-gray-500">{job.invoice_number || `#${job.job_id}`}</div>
@@ -403,7 +466,26 @@ export default function FilingCabinet() {
       {/* ══ RIGHT DOSSIER PANEL ═══════════════════════════════════ */}
       <div className="flex-1 overflow-y-auto bg-gray-50">
 
-        {!selectedId && (
+        {/* ── GAPS VIEW ─────────────────────────────────────────── */}
+        {statusFilter === 'gaps' && (
+          <DataGapsPanel
+            gaps={gaps}
+            loading={gapsLoading}
+            allJobs={allJobs}
+            hoursForm={hoursForm}
+            setHoursForm={setHoursForm}
+            linkJob={linkJob}
+            setLinkJob={setLinkJob}
+            overheadForm={overheadForm}
+            setOverheadForm={setOverheadForm}
+            today={today}
+            sections={gapSections}
+            setSections={setGapSections}
+            refreshGaps={refreshGaps}
+          />
+        )}
+
+        {statusFilter !== 'gaps' && !selectedId && (
           <div className="flex flex-col items-center justify-center h-full text-gray-400">
             <div className="text-5xl mb-4">🗂</div>
             <div className="text-xl font-medium">Select a job</div>
@@ -411,11 +493,11 @@ export default function FilingCabinet() {
           </div>
         )}
 
-        {selectedId && detailLoading && (
+        {statusFilter !== 'gaps' && selectedId && detailLoading && (
           <div className="flex items-center justify-center h-64 text-gray-400">Loading...</div>
         )}
 
-        {selectedId && detail && !detailLoading && (
+        {statusFilter !== 'gaps' && selectedId && detail && !detailLoading && (
           <div className="p-6 space-y-4 max-w-4xl">
 
             {/* ── TOOLBAR ────────────────────────────────────────── */}
@@ -1053,6 +1135,563 @@ function TimeEntryRow({ entry, unlinked, onClaim, customerJobs, currentJobId, on
           >
             Claim
           </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────
+// Data Gaps Panel
+// ─────────────────────────────────────────────────────────────────
+
+function calcHoursFromTimes(arrive, depart) {
+  if (!arrive || !depart) return 0
+  const [ah, am] = arrive.split(':').map(Number)
+  const [dh, dm] = depart.split(':').map(Number)
+  const mins = (dh * 60 + dm) - (ah * 60 + am)
+  return mins > 0 ? parseFloat((mins / 60).toFixed(2)) : 0
+}
+
+const OVERHEAD_CATEGORIES = [
+  'Fuel & Transportation', 'Tools & Equipment', 'Equipment Repair',
+  'Insurance', 'Licensing', 'Marketing', 'Office & Phone',
+  'Clothing', 'Professional Development', 'Other',
+]
+
+function GapSectionHeader({ title, count, open, onToggle, colorClass }) {
+  return (
+    <button
+      onClick={onToggle}
+      className={`w-full flex items-center justify-between px-5 py-3 border-b border-gray-100 hover:bg-gray-50 transition-colors ${colorClass || ''}`}
+    >
+      <div className="flex items-center gap-2">
+        <span className="text-xs font-semibold text-gray-700 uppercase tracking-wide">{title}</span>
+        {count > 0 && (
+          <span className="bg-amber-100 text-amber-700 text-xs font-bold rounded-full px-2 py-0">{count}</span>
+        )}
+        {count === 0 && (
+          <span className="bg-green-100 text-green-700 text-xs font-medium rounded-full px-2 py-0">All clear</span>
+        )}
+      </div>
+      <span className="text-gray-400 text-sm">{open ? '▲' : '▼'}</span>
+    </button>
+  )
+}
+
+function DataGapsPanel({
+  gaps, loading, allJobs,
+  hoursForm, setHoursForm,
+  linkJob, setLinkJob,
+  overheadForm, setOverheadForm,
+  today, sections, setSections,
+  refreshGaps,
+}) {
+  const [savingHours, setSavingHours] = useState({})
+  const [markingIncomplete, setMarkingIncomplete] = useState({})
+  const [linkingSaving, setLinkingSaving] = useState({})
+  const [addingOverhead, setAddingOverhead] = useState(false)
+  const [confirmingTrip, setConfirmingTrip] = useState({})
+
+  function toggleSection(key) {
+    setSections(prev => ({ ...prev, [key]: !prev[key] }))
+  }
+
+  // ── Section 1: Enter hours inline ────────────────────────────
+  async function handleSaveHours(gap) {
+    const form = hoursForm[gap.job_id] || {}
+    if (!form.entry_date || !form.arrive_time || !form.depart_time) {
+      alert('Please fill in date, arrive, and depart times.')
+      return
+    }
+    setSavingHours(prev => ({ ...prev, [gap.job_id]: true }))
+    try {
+      const res = await fetch(`${API}/time-entries`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          customer_id: gap.customer_id,
+          job_id: gap.job_id,
+          entry_date: form.entry_date,
+          arrive_time: form.arrive_time,
+          depart_time: form.depart_time,
+        }),
+      })
+      if (!res.ok) throw new Error((await res.json()).error || 'Failed')
+      setHoursForm(prev => { const n = { ...prev }; delete n[gap.job_id]; return n })
+      refreshGaps()
+    } catch (e) {
+      alert('Error saving time entry: ' + e.message)
+    } finally {
+      setSavingHours(prev => ({ ...prev, [gap.job_id]: false }))
+    }
+  }
+
+  async function handleMarkIncomplete(gap) {
+    if (!window.confirm(`Mark "${gap.invoice_number}" as final but incomplete? This flags it has no time records.`)) return
+    setMarkingIncomplete(prev => ({ ...prev, [gap.job_id]: true }))
+    try {
+      await fetch(`${API}/jobs/${gap.job_id}/mark-incomplete`, { method: 'POST' })
+      refreshGaps()
+    } catch {
+      alert('Error marking incomplete')
+    } finally {
+      setMarkingIncomplete(prev => ({ ...prev, [gap.job_id]: false }))
+    }
+  }
+
+  // ── Section 2: Link time entry ────────────────────────────────
+  async function handleLinkEntry(entry) {
+    const jobId = linkJob[entry.id]
+    if (!jobId) { alert('Select a job to link to.'); return }
+    setLinkingSaving(prev => ({ ...prev, [entry.id]: true }))
+    try {
+      const res = await fetch(`${API}/time-entries/${entry.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_id: parseInt(jobId) }),
+      })
+      if (!res.ok) throw new Error((await res.json()).error || 'Failed')
+      setLinkJob(prev => { const n = { ...prev }; delete n[entry.id]; return n })
+      refreshGaps()
+    } catch (e) {
+      alert('Error linking entry: ' + e.message)
+    } finally {
+      setLinkingSaving(prev => ({ ...prev, [entry.id]: false }))
+    }
+  }
+
+  // ── Section 3: Add overhead expense ──────────────────────────
+  async function handleAddOverhead(e) {
+    e.preventDefault()
+    if (!overheadForm.cost || !overheadForm.expense_category) {
+      alert('Amount and category are required.')
+      return
+    }
+    setAddingOverhead(true)
+    try {
+      const res = await fetch(`${API}/expenses`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          is_overhead: true,
+          job_id: null,
+          expense_date: overheadForm.expense_date,
+          expense_category: overheadForm.expense_category,
+          cost: parseFloat(overheadForm.cost),
+          vendor: overheadForm.vendor,
+          notes: overheadForm.notes,
+        }),
+      })
+      if (!res.ok) throw new Error((await res.json()).error || 'Failed')
+      setOverheadForm({ expense_date: today, expense_category: 'Fuel & Transportation', cost: '', vendor: '', notes: '' })
+      refreshGaps()
+    } catch (e) {
+      alert('Error adding expense: ' + e.message)
+    } finally {
+      setAddingOverhead(false)
+    }
+  }
+
+  // ── Section 4: Confirm / Skip trip ───────────────────────────
+  async function handleConfirmTrip(teId) {
+    setConfirmingTrip(prev => ({ ...prev, [teId]: 'confirming' }))
+    try {
+      await fetch(`${API}/suggested-trips/${teId}/confirm`, { method: 'POST' })
+      refreshGaps()
+    } catch {
+      alert('Error confirming trip')
+    } finally {
+      setConfirmingTrip(prev => { const n = { ...prev }; delete n[teId]; return n })
+    }
+  }
+
+  async function handleSkipTrip(teId) {
+    setConfirmingTrip(prev => ({ ...prev, [teId]: 'skipping' }))
+    try {
+      await fetch(`${API}/suggested-trips/${teId}/skip`, { method: 'POST' })
+      refreshGaps()
+    } catch {
+      alert('Error skipping trip')
+    } finally {
+      setConfirmingTrip(prev => { const n = { ...prev }; delete n[teId]; return n })
+    }
+  }
+
+  if (loading) {
+    return <div className="flex items-center justify-center h-64 text-gray-400 text-sm">Loading data gaps...</div>
+  }
+
+  if (!gaps) {
+    return (
+      <div className="flex flex-col items-center justify-center h-64 text-gray-400">
+        <div className="text-lg font-medium">No data loaded</div>
+        <div className="text-sm mt-1">Switch away and back to retry</div>
+      </div>
+    )
+  }
+
+  const missingTime = gaps.missing_time_entries || []
+  const unlinked    = gaps.unlinked_time_entries || []
+  const overhead    = gaps.overhead_gap || {}
+  const suggested   = gaps.suggested_trips || []
+
+  const totalGaps = missingTime.length + unlinked.length + suggested.length
+
+  return (
+    <div className="p-6 space-y-4 max-w-4xl">
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-bold text-gray-900">Data Gaps</h2>
+          <p className="text-sm text-gray-500 mt-0.5">
+            {totalGaps === 0
+              ? 'No data gaps found — records look complete.'
+              : `${totalGaps} item${totalGaps !== 1 ? 's' : ''} need attention`}
+          </p>
+        </div>
+      </div>
+
+      {/* ── Section 1: Invoices Missing Time Entries ─────────── */}
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <GapSectionHeader
+          title="Invoices Missing Time Entries"
+          count={missingTime.length}
+          open={sections.missing_time}
+          onToggle={() => toggleSection('missing_time')}
+        />
+        {sections.missing_time && (
+          missingTime.length === 0 ? (
+            <div className="px-5 py-6 flex items-center gap-2 text-green-700">
+              <span className="text-xl">&#10003;</span>
+              <span className="text-sm font-medium">All invoices have time entries logged</span>
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-gray-50 border-b border-gray-100 text-xs text-gray-400 font-medium">
+                    <th className="px-5 py-2 text-left">Invoice #</th>
+                    <th className="px-3 py-2 text-left">Date</th>
+                    <th className="px-3 py-2 text-left">Customer</th>
+                    <th className="px-3 py-2 text-right">Billed</th>
+                    <th className="px-3 py-2 text-center">Services</th>
+                    <th className="px-5 py-2 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-50">
+                  {missingTime.map(gap => {
+                    const formOpen = !!hoursForm[gap.job_id]
+                    const form = hoursForm[gap.job_id] || {}
+                    const hrs = calcHoursFromTimes(form.arrive_time, form.depart_time)
+                    return (
+                      <Fragment key={gap.job_id}>
+                        <tr className="hover:bg-gray-50">
+                          <td className="px-5 py-3 font-mono text-gray-700">{gap.invoice_number || `#${gap.job_id}`}</td>
+                          <td className="px-3 py-3 text-gray-500">{gap.invoice_date || ''}</td>
+                          <td className="px-3 py-3 text-gray-700">{gap.customer_name}</td>
+                          <td className="px-3 py-3 text-right tabular-nums text-gray-700">{fmt(gap.total_amount)}</td>
+                          <td className="px-3 py-3 text-center text-gray-500">{gap.service_count || 0}</td>
+                          <td className="px-5 py-3 text-right">
+                            <div className="flex items-center justify-end gap-2">
+                              <button
+                                onClick={() => setHoursForm(prev => {
+                                  const n = { ...prev }
+                                  if (n[gap.job_id]) { delete n[gap.job_id] }
+                                  else { n[gap.job_id] = { entry_date: today, arrive_time: '', depart_time: '' } }
+                                  return n
+                                })}
+                                className="text-xs border border-blue-300 text-blue-600 rounded px-2.5 py-1 hover:bg-blue-50 font-medium"
+                              >
+                                {formOpen ? 'Cancel' : 'Enter Hours'}
+                              </button>
+                              <button
+                                onClick={() => handleMarkIncomplete(gap)}
+                                disabled={markingIncomplete[gap.job_id]}
+                                className="text-xs border border-amber-300 text-amber-600 rounded px-2.5 py-1 hover:bg-amber-50 font-medium disabled:opacity-50"
+                              >
+                                {markingIncomplete[gap.job_id] ? 'Marking...' : 'Mark Final (Incomplete)'}
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                        {formOpen && (
+                          <tr className="bg-blue-50/40">
+                            <td colSpan={6} className="px-5 py-3">
+                              <div className="flex items-end gap-3 flex-wrap">
+                                <div>
+                                  <label className="block text-xs text-gray-500 mb-1">Date</label>
+                                  <input
+                                    type="date"
+                                    value={form.entry_date || today}
+                                    onChange={e => setHoursForm(prev => ({ ...prev, [gap.job_id]: { ...prev[gap.job_id], entry_date: e.target.value } }))}
+                                    className="border border-gray-200 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 bg-white"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-xs text-gray-500 mb-1">Arrive</label>
+                                  <input
+                                    type="time"
+                                    value={form.arrive_time || ''}
+                                    onChange={e => setHoursForm(prev => ({ ...prev, [gap.job_id]: { ...prev[gap.job_id], arrive_time: e.target.value } }))}
+                                    className="border border-gray-200 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 bg-white"
+                                  />
+                                </div>
+                                <div>
+                                  <label className="block text-xs text-gray-500 mb-1">Depart</label>
+                                  <input
+                                    type="time"
+                                    value={form.depart_time || ''}
+                                    onChange={e => setHoursForm(prev => ({ ...prev, [gap.job_id]: { ...prev[gap.job_id], depart_time: e.target.value } }))}
+                                    className="border border-gray-200 rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 bg-white"
+                                  />
+                                </div>
+                                {hrs > 0 && (
+                                  <div className="text-sm text-gray-600 font-medium pb-1.5">{hrs}h</div>
+                                )}
+                                <button
+                                  onClick={() => handleSaveHours(gap)}
+                                  disabled={savingHours[gap.job_id]}
+                                  className="bg-blue-600 text-white px-4 py-1.5 rounded text-sm hover:bg-blue-700 disabled:opacity-50 font-medium"
+                                >
+                                  {savingHours[gap.job_id] ? 'Saving...' : 'Save'}
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )
+        )}
+      </div>
+
+      {/* ── Section 2: Unlinked Time Entries ─────────────────── */}
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <GapSectionHeader
+          title="Unlinked Time Entries"
+          count={unlinked.length}
+          open={sections.unlinked}
+          onToggle={() => toggleSection('unlinked')}
+        />
+        {sections.unlinked && (
+          unlinked.length === 0 ? (
+            <div className="px-5 py-6 text-sm text-gray-500">All time entries are linked to jobs</div>
+          ) : (
+            <div className="divide-y divide-gray-50">
+              {unlinked.map(entry => {
+                const customerJobs = allJobs.filter(j => j.customer_id === entry.customer_id)
+                return (
+                  <div key={entry.id} className="px-5 py-3 flex items-center justify-between gap-4 flex-wrap">
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm text-gray-800 truncate">
+                        {entry.description || entry.busybusy_project || 'No description'}
+                      </div>
+                      <div className="text-xs text-gray-400 mt-0.5 flex items-center gap-2 flex-wrap">
+                        <span>{entry.entry_date}</span>
+                        <span className="text-gray-300">·</span>
+                        <span className="font-medium text-gray-600">{entry.customer_name}</span>
+                        <span className="text-gray-300">·</span>
+                        <span>{(entry.hours || 0).toFixed(2)}h</span>
+                        {entry.start_time && entry.end_time && (
+                          <span>{fmtTime(entry.start_time)} – {fmtTime(entry.end_time)}</span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      {customerJobs.length > 0 ? (
+                        <>
+                          <select
+                            value={linkJob[entry.id] || ''}
+                            onChange={e => setLinkJob(prev => ({ ...prev, [entry.id]: e.target.value }))}
+                            className="text-xs border border-gray-200 rounded px-2 py-1.5 bg-white focus:outline-none focus:ring-1 focus:ring-blue-400 max-w-44"
+                          >
+                            <option value="">-- select job --</option>
+                            {customerJobs.map(j => (
+                              <option key={j.job_id} value={j.job_id}>
+                                {j.invoice_number || `#${j.job_id}`}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            onClick={() => handleLinkEntry(entry)}
+                            disabled={linkingSaving[entry.id] || !linkJob[entry.id]}
+                            className="text-xs bg-blue-600 text-white rounded px-3 py-1.5 hover:bg-blue-700 disabled:opacity-50 font-medium"
+                          >
+                            {linkingSaving[entry.id] ? 'Linking...' : 'Link'}
+                          </button>
+                        </>
+                      ) : (
+                        <span className="text-xs text-gray-400 italic">No jobs for this customer</span>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )
+        )}
+      </div>
+
+      {/* ── Section 3: Overhead Expenses ─────────────────────── */}
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <GapSectionHeader
+          title="Overhead Expenses"
+          count={overhead.zero_overhead_weeks > 2 ? 1 : 0}
+          open={sections.overhead}
+          onToggle={() => toggleSection('overhead')}
+        />
+        {sections.overhead && (
+          <div className="p-5 space-y-4">
+            {overhead.zero_overhead_weeks > 2 && (
+              <div className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-lg px-4 py-3">
+                <span className="text-amber-600 font-bold text-lg">!</span>
+                <span className="text-sm text-amber-700 font-medium">
+                  No overhead expenses logged in {overhead.zero_overhead_weeks} week{overhead.zero_overhead_weeks !== 1 ? 's' : ''}
+                  {overhead.last_overhead_date ? ` (last: ${overhead.last_overhead_date})` : ''}
+                </span>
+              </div>
+            )}
+            <form onSubmit={handleAddOverhead}>
+              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">Quick-Add Overhead Expense</p>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Date</label>
+                  <input
+                    type="date"
+                    value={overheadForm.expense_date}
+                    onChange={e => setOverheadForm(f => ({ ...f, expense_date: e.target.value }))}
+                    className={INPUT}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Category</label>
+                  <select
+                    value={overheadForm.expense_category}
+                    onChange={e => setOverheadForm(f => ({ ...f, expense_category: e.target.value }))}
+                    className={INPUT}
+                  >
+                    {OVERHEAD_CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Amount ($) *</label>
+                  <div className="relative">
+                    <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">$</span>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0.01"
+                      value={overheadForm.cost}
+                      onChange={e => setOverheadForm(f => ({ ...f, cost: e.target.value }))}
+                      placeholder="0.00"
+                      className="w-full border border-gray-200 rounded-lg pl-7 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">Vendor</label>
+                  <input
+                    type="text"
+                    value={overheadForm.vendor}
+                    onChange={e => setOverheadForm(f => ({ ...f, vendor: e.target.value }))}
+                    placeholder="Home Depot, Shell, etc."
+                    className={INPUT}
+                  />
+                </div>
+                <div className="col-span-2">
+                  <label className="block text-xs text-gray-400 mb-1">Notes (optional)</label>
+                  <input
+                    type="text"
+                    value={overheadForm.notes}
+                    onChange={e => setOverheadForm(f => ({ ...f, notes: e.target.value }))}
+                    placeholder="Brief description..."
+                    className={INPUT}
+                  />
+                </div>
+              </div>
+              <button
+                type="submit"
+                disabled={addingOverhead || !overheadForm.cost}
+                className="mt-3 bg-blue-600 text-white px-5 py-2 rounded-lg text-sm hover:bg-blue-700 disabled:opacity-50 font-medium"
+              >
+                {addingOverhead ? 'Adding...' : 'Add Expense'}
+              </button>
+            </form>
+          </div>
+        )}
+      </div>
+
+      {/* ── Section 4: Suggested Trips ───────────────────────── */}
+      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+        <GapSectionHeader
+          title="Suggested Trips"
+          count={suggested.length}
+          open={sections.suggested}
+          onToggle={() => toggleSection('suggested')}
+        />
+        {sections.suggested && (
+          suggested.length === 0 ? (
+            <div className="px-5 py-6 flex items-center gap-2 text-green-700">
+              <span className="text-xl">&#10003;</span>
+              <span className="text-sm font-medium">No trip suggestions — all clear</span>
+            </div>
+          ) : (
+            <>
+              <div className="divide-y divide-gray-50">
+                {suggested.map(trip => (
+                  <div key={trip.time_entry_id} className="px-5 py-3 flex items-center justify-between gap-4 flex-wrap">
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium text-gray-800">{trip.customer_name}</div>
+                      <div className="text-xs text-gray-400 mt-0.5 flex items-center gap-2 flex-wrap">
+                        <span>{trip.entry_date}</span>
+                        <span className="text-gray-300">·</span>
+                        <span className="font-semibold text-gray-600">{trip.mileage_from_home} mi one-way</span>
+                        <span className="text-gray-300">·</span>
+                        <span>{(trip.hours || 0).toFixed(1)}h worked</span>
+                        {trip.start_time && trip.end_time && (
+                          <>
+                            <span className="text-gray-300">·</span>
+                            <span>{fmtTime(trip.start_time)} – {fmtTime(trip.end_time)}</span>
+                          </>
+                        )}
+                      </div>
+                      {trip.customer_address && (
+                        <div className="text-xs text-gray-400 mt-0.5 truncate">{trip.customer_address}</div>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <button
+                        onClick={() => handleConfirmTrip(trip.time_entry_id)}
+                        disabled={!!confirmingTrip[trip.time_entry_id]}
+                        className="text-xs bg-green-600 text-white rounded px-3 py-1.5 hover:bg-green-700 disabled:opacity-50 font-medium"
+                      >
+                        {confirmingTrip[trip.time_entry_id] === 'confirming' ? 'Confirming...' : 'Confirm Trip'}
+                      </button>
+                      <button
+                        onClick={() => handleSkipTrip(trip.time_entry_id)}
+                        disabled={!!confirmingTrip[trip.time_entry_id]}
+                        className="text-xs text-gray-400 hover:text-gray-600 rounded px-2 py-1.5 font-medium disabled:opacity-50"
+                      >
+                        {confirmingTrip[trip.time_entry_id] === 'skipping' ? 'Skipping...' : 'Skip'}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="px-5 py-3 bg-gray-50 border-t border-gray-100">
+                <p className="text-xs text-gray-400">
+                  Only showing jobs where mileage has been calculated.{' '}
+                  <Link to="/customers" className="text-blue-500 hover:underline">Go to Customers</Link>{' '}
+                  to calculate mileage for more customers.
+                </p>
+              </div>
+            </>
+          )
         )}
       </div>
     </div>
