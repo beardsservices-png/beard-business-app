@@ -9,6 +9,7 @@ import Estimate from './pages/Estimate'
 import Expenses from './pages/Expenses'
 import Trips from './pages/Trips'
 import Reports from './pages/Reports'
+import DayWrapup from './pages/DayWrapup'
 
 function App() {
   return (
@@ -57,6 +58,10 @@ function App() {
                   `px-3 py-1.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${isActive ? 'bg-indigo-100 text-indigo-700' : 'text-slate-600 hover:bg-slate-100'}`}>
                   Reports
                 </NavLink>
+                <NavLink to="/day-wrapup" className={({ isActive }) =>
+                  `px-3 py-1.5 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${isActive ? 'bg-purple-100 text-purple-700' : 'bg-purple-50 text-purple-600 hover:bg-purple-100'}`}>
+                  Day Wrap-Up
+                </NavLink>
               </div>
             </div>
           </div>
@@ -73,6 +78,7 @@ function App() {
             <Route path="/expenses" element={<Expenses />} />
             <Route path="/trips" element={<Trips />} />
             <Route path="/reports" element={<Reports />} />
+            <Route path="/day-wrapup" element={<DayWrapup />} />
           </Routes>
         </main>
       </div>

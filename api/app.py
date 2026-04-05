@@ -67,6 +67,12 @@ def migrate_db():
     except:
         pass
 
+    # source on materials_expenses (tracks how expense was entered)
+    try:
+        conn.execute("ALTER TABLE materials_expenses ADD COLUMN source TEXT DEFAULT NULL")
+    except:
+        pass
+
     # payments table
     cursor.execute('''CREATE TABLE IF NOT EXISTS payments (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2330,6 +2336,263 @@ def pl_report():
         },
         'date_range': {'start': start, 'end': end},
     })
+
+
+# ============================================================
+# DAY WRAP-UP — bulk end-of-day data entry
+# ============================================================
+
+@app.route('/api/day-wrapup', methods=['POST'])
+def day_wrapup():
+    """
+    Accept all end-of-day data in one request and persist it atomically.
+    Body shape:
+      {
+        date: "2026-04-05",
+        jobs: [{
+          customer_id, job_id (or null),
+          new_job_desc, new_job_type,
+          arrive_time, depart_time,   -- "HH:MM" 24h
+          services: [{name, category, qty, unit, price, is_material}],
+          materials: [{description, cost, vendor}],
+          payment: {amount, method, memo} or null,
+          log_trip, trip_miles, trip_drive_time, trip_notes
+        }],
+        other_trips: [{
+          purpose, destination, customer_id, job_id,
+          miles, drive_time, planned, notes
+        }],
+        expenses: [{
+          category, description, amount, vendor,
+          is_overhead, job_id, customer_id
+        }]
+      }
+    """
+    data = request.json
+    if not data or not data.get('date'):
+        return jsonify({'error': 'date is required'}), 400
+
+    date = data['date']
+    jobs_in  = data.get('jobs', [])
+    trips_in = data.get('other_trips', [])
+    exps_in  = data.get('expenses', [])
+
+    PURPOSE_MAP = {
+        'site_assessment':   'job_site',
+        'measuring':         'job_site',
+        'payment_pickup':    'job_site',
+        'materials_planned': 'supply_planned',
+        'materials_unplanned': 'supply_unplanned',
+        'fuel':              'other',
+        'other':             'other',
+    }
+
+    conn = get_db()
+    cursor = conn.cursor()
+    summary = {'time_entries': 0, 'services': 0, 'materials': 0,
+               'payments': 0, 'trips': 0, 'expenses': 0, 'new_jobs': 0}
+
+    try:
+        for job_data in jobs_in:
+            cust_id = job_data.get('customer_id')
+            job_id  = job_data.get('job_id')
+
+            # Create new job + invoice if needed
+            if not job_id and cust_id:
+                desc = job_data.get('new_job_desc', 'Work logged via Day Wrap-Up')
+                svc_type = job_data.get('new_job_type', 'General Handyman')
+                today_str = date
+                # derive invoice_id from date + customer
+                inv_num = 'BHS' + today_str.replace('-', '')
+                # make unique if collision
+                existing = cursor.execute(
+                    'SELECT COUNT(*) FROM jobs WHERE invoice_id LIKE ?', (inv_num + '%',)
+                ).fetchone()[0]
+                if existing:
+                    inv_num = inv_num + chr(ord('A') + existing - 1)
+                cursor.execute('''
+                    INSERT INTO jobs (customer_id, invoice_id, project_number,
+                                      start_date, end_date, status, notes)
+                    VALUES (?, ?, ?, ?, ?, 'completed', ?)
+                ''', (cust_id, inv_num, inv_num.replace('BHS',''),
+                      today_str, today_str, desc))
+                job_id = cursor.lastrowid
+                # stub invoice
+                cursor.execute('''
+                    INSERT INTO invoices (invoice_number, customer_id, job_id,
+                                          total_labor, total_materials, total_amount,
+                                          invoice_date, status)
+                    VALUES (?, ?, ?, 0, 0, 0, ?, 'completed')
+                ''', (inv_num, cust_id, job_id, today_str))
+                summary['new_jobs'] += 1
+
+            # Time entry
+            arrive = job_data.get('arrive_time')
+            depart = job_data.get('depart_time')
+            hours  = job_data.get('hours')
+            if arrive and depart and not hours:
+                from datetime import datetime as _dt
+                try:
+                    delta = _dt.strptime(depart, '%H:%M') - _dt.strptime(arrive, '%H:%M')
+                    hours = round(delta.seconds / 3600, 2)
+                except Exception:
+                    hours = None
+            if hours and cust_id:
+                notes_te = job_data.get('notes', '')
+                cursor.execute('''
+                    INSERT INTO time_entries
+                        (customer_id, job_id, entry_date, start_time, end_time,
+                         hours, description, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'Day Wrap-Up')
+                ''', (cust_id, job_id, date, arrive, depart, hours, notes_te))
+                summary['time_entries'] += 1
+
+            # Services performed
+            inv_row = cursor.execute(
+                'SELECT id FROM invoices WHERE job_id = ?', (job_id,)
+            ).fetchone() if job_id else None
+            inv_id = inv_row['id'] if inv_row else None
+            add_labor = 0.0
+            add_mats  = 0.0
+            for svc in job_data.get('services', []):
+                if not svc.get('name') and not svc.get('category'):
+                    continue
+                price = float(svc.get('price') or 0)
+                qty   = float(svc.get('qty') or 1)
+                total = round(price * qty, 2)
+                is_mat = bool(svc.get('is_material', False))
+                cursor.execute('''
+                    INSERT INTO services_performed
+                        (invoice_id, job_id, original_description, standardized_description,
+                         category, amount, service_type, quantity, unit_of_measure)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (inv_id, job_id,
+                      svc.get('name', ''), svc.get('name', ''),
+                      svc.get('category', ''), total,
+                      'materials' if is_mat else 'labor',
+                      qty, svc.get('unit', 'job')))
+                if is_mat:
+                    add_mats += total
+                else:
+                    add_labor += total
+                summary['services'] += 1
+            # Update invoice totals
+            if inv_id and (add_labor or add_mats):
+                cursor.execute('''
+                    UPDATE invoices
+                    SET total_labor    = total_labor + ?,
+                        total_materials = total_materials + ?,
+                        total_amount   = total_amount + ?
+                    WHERE id = ?
+                ''', (add_labor, add_mats, add_labor + add_mats, inv_id))
+
+            # Materials/expenses for this job
+            for mat in job_data.get('materials', []):
+                if not mat.get('description') or not mat.get('cost'):
+                    continue
+                cursor.execute('''
+                    INSERT INTO materials_expenses
+                        (job_id, customer_id, description, cost, vendor,
+                         expense_date, expense_category, is_overhead, source)
+                    VALUES (?, ?, ?, ?, ?, ?, 'Materials & Supplies', 0, 'Day Wrap-Up')
+                ''', (job_id, cust_id, mat['description'],
+                      float(mat['cost']), mat.get('vendor', ''), date))
+                summary['materials'] += 1
+
+            # Payment
+            pmt = job_data.get('payment')
+            if pmt and pmt.get('amount') and float(pmt['amount']) > 0 and job_id:
+                cursor.execute('''
+                    INSERT INTO payments
+                        (job_id, customer_id, amount, payment_date, payment_method, memo)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (job_id, cust_id, float(pmt['amount']), date,
+                      pmt.get('method', 'Cash'), pmt.get('memo', '')))
+                # Auto-update job status
+                cursor.execute(
+                    'SELECT COALESCE(SUM(amount),0) FROM payments WHERE job_id=?', (job_id,)
+                )
+                total_paid = cursor.fetchone()[0]
+                cursor.execute(
+                    'SELECT COALESCE(total_amount,0) FROM invoices WHERE job_id=?', (job_id,)
+                )
+                inv_total = cursor.fetchone()[0]
+                if inv_total > 0 and total_paid >= inv_total:
+                    cursor.execute("UPDATE jobs SET status='completed' WHERE id=?", (job_id,))
+                    cursor.execute("UPDATE invoices SET status='paid' WHERE job_id=?", (job_id,))
+                summary['payments'] += 1
+
+            # Trip to job site
+            if job_data.get('log_trip') and job_data.get('trip_miles') and cust_id:
+                trip_notes = job_data.get('trip_notes', '')
+                cursor.execute('''
+                    INSERT INTO trips
+                        (trip_date, trip_type, destination, customer_id, job_id,
+                         miles, drive_time_minutes, notes)
+                    VALUES (?, 'job_site', ?, ?, ?, ?, ?, ?)
+                ''', (date, job_data.get('trip_destination', ''),
+                      cust_id, job_id,
+                      float(job_data['trip_miles']),
+                      job_data.get('trip_drive_time'),
+                      trip_notes))
+                summary['trips'] += 1
+
+        # Other trips
+        for t in trips_in:
+            if not t.get('purpose'):
+                continue
+            trip_type = PURPOSE_MAP.get(t['purpose'], 'other')
+            purpose_label = {
+                'site_assessment': 'Site assessment',
+                'measuring': 'Measuring/estimate visit',
+                'payment_pickup': 'Picked up payment',
+                'materials_planned': 'Materials pickup (planned)',
+                'materials_unplanned': 'Materials pickup (unplanned)',
+                'fuel': 'Fuel stop',
+                'other': 'Other trip',
+            }.get(t['purpose'], t['purpose'])
+            notes = t.get('notes', '')
+            full_notes = f"{purpose_label}. {notes}".strip('. ')
+            cursor.execute('''
+                INSERT INTO trips
+                    (trip_date, trip_type, destination, customer_id, job_id,
+                     miles, drive_time_minutes, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (date, trip_type, t.get('destination', ''),
+                  t.get('customer_id') or None,
+                  t.get('job_id') or None,
+                  float(t['miles']) if t.get('miles') else None,
+                  t.get('drive_time') or None,
+                  full_notes))
+            summary['trips'] += 1
+
+        # Other expenses (overhead or job-linked)
+        for exp in exps_in:
+            if not exp.get('description') or not exp.get('amount'):
+                continue
+            cursor.execute('''
+                INSERT INTO materials_expenses
+                    (job_id, customer_id, description, cost, vendor,
+                     expense_date, expense_category, is_overhead, payment_method, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (exp.get('job_id') or None,
+                  exp.get('customer_id') or None,
+                  exp['description'], float(exp['amount']),
+                  exp.get('vendor', ''), date,
+                  exp.get('category', 'Other'),
+                  1 if exp.get('is_overhead', True) else 0,
+                  exp.get('payment_method', 'Unknown'),
+                  exp.get('notes', '')))
+            summary['expenses'] += 1
+
+        conn.commit()
+        conn.close()
+        return jsonify({'ok': True, 'summary': summary}), 201
+
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+        return jsonify({'error': str(e)}), 500
 
 
 # ============================================================
