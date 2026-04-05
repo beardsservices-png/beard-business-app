@@ -93,5 +93,5 @@ GET  /api/health
 ## Brian's Preferences
 - Explain in plain business terms, not tech terms
 - FreshBooks-style clean UI
-- Free tools only (has Claude subscription)
+- Free tools preferably when possible (has Claude subscription)
 - End-of-day time entry (quick, 2 min per job)

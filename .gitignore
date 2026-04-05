@@ -1,3 +1,8 @@
+# Environment / secrets
+.env
+.env.*
+*.env
+
 # Claude temp directories
 tmpclaude-*/
 
